@@ -14,6 +14,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { isStale, useStore } from '../store';
 import type { Page, Rotation } from '../types';
 import { UploadZone } from './UploadZone';
+import { Switch } from './Switch';
 import { ImageEditor } from './ImageEditor';
 import { IconEdit, IconGrip, IconReplace, IconRotateLeft, IconRotateRight, IconSpinner, IconTrash, IconWarn } from './Icons';
 
@@ -109,14 +110,18 @@ export function PageManager() {
               <option value="6">Ein Textblock</option>
             </select>
           </label>
-          <label className="flex items-center gap-2" title="Gleicht Schatten und ungleichmäßige Beleuchtung bei Handyfotos aus">
-            <input
-              type="checkbox"
-              checked={settings.preprocess}
-              onChange={(e) => updateSettings({ preprocess: e.target.checked })}
+          <div className="w-56">
+            <Switch checked={settings.preprocess} onChange={(v) => updateSettings({ preprocess: v })} label="Beleuchtung ausgleichen" testId="sw-preprocess" />
+          </div>
+          <div className="w-56">
+            <Switch
+              checked={settings.autocorrect}
+              onChange={(v) => updateSettings({ autocorrect: v })}
+              label="Autokorrektur"
+              hint="eindeutige Lesefehler, bleibt markiert"
+              testId="sw-autocorrect"
             />
-            <span>Beleuchtung ausgleichen</span>
-          </label>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {done > 0 && (

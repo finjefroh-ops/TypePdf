@@ -133,6 +133,20 @@ export function analyzeOcr(input: OBlock[], imgW: number, imgH: number, margins:
       l.words = l.words.slice(0, -1);
       cands.push({ line: l, value: last.text, conf: last.confidence, removed: { word: last, at: 'end' } });
     }
+    else {
+      // Randzahl, die in der OCR-Reihenfolge an falscher Stelle steht (z. B. links im Bild, aber als letztes Wort)
+      const others = (w: OWord) => l.words.filter((x) => x !== w);
+      const stray = l.words.find((w) => {
+        if (!isNumberToken(w.text) || l.words.length < 3) return false;
+        const o = others(w);
+        const minX = Math.min(...o.map((x) => x.bbox.x0));
+        return w.bbox.x1 < minX - medH * 1.2 && w.bbox.x1 <= leftEdge + medH * 0.5;
+      });
+      if (stray) {
+        l.words = others(stray);
+        cands.push({ line: l, value: stray.text, conf: stray.confidence, removed: { word: stray, at: 'start' } });
+      }
+    }
   }
 
   // Absätze, die nur aus einzelnen Randzahlen bestehen (eigene Spalte)
@@ -182,7 +196,7 @@ export function analyzeOcr(input: OBlock[], imgW: number, imgH: number, margins:
       bestOff = off;
       bestCount = n;
     }
-  const strongSingle = bestCount === 1 && cands.length === 1 && cands[0].conf >= 85 && Number(cands[0].value) % 5 === 0;
+  const strongSingle = bestCount === 1 && cands.length === 1 && cands[0].conf >= 70 && Number(cands[0].value) % 5 === 0;
   for (const c of cands) {
     const off = Number(c.value) - (idxOf.get(c.line) ?? 0);
     const ok = bestOff !== null && off === bestOff && (bestCount >= 2 || strongSingle);
@@ -421,7 +435,13 @@ export function analyzeOcr(input: OBlock[], imgW: number, imgH: number, margins:
         const wt = cleanWord(w.text);
         const start = text.length;
         text += wt;
-        if (w.confidence < STORE_MARK_BELOW) marks.push({ start, end: text.length, conf: Math.round(w.confidence) });
+        if (w.confidence < STORE_MARK_BELOW)
+          marks.push({
+            start,
+            end: text.length,
+            conf: Math.round(w.confidence),
+            box: { x0: w.bbox.x0 / imgW, y0: w.bbox.y0 / imgH, x1: w.bbox.x1 / imgW, y1: w.bbox.y1 / imgH },
+          });
       });
       lineNos.push(l.lineNo);
       lineBoxes.push({ x0: l.bbox.x0 / imgW, y0: l.bbox.y0 / imgH, x1: l.bbox.x1 / imgW, y1: l.bbox.y1 / imgH });

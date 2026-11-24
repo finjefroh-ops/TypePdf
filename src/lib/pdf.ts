@@ -90,12 +90,71 @@ function wrap(text: string, font: PDFFont, size: number, maxW: number, firstInde
   return lines;
 }
 
+export interface RangeHit {
+  pageIndex: number;
+  blockId: string;
+  preview: string;
+}
+export interface RangeResult {
+  start: RangeHit | null;
+  end: RangeHit | null;
+  /** Begriff eingegeben, aber nicht gefunden */
+  startMissing: boolean;
+  endMissing: boolean;
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Sucht den Bereich für das PDF („ab M5“ / „bis M7“). Bevorzugt Abschnitte, die mit dem
+ * Begriff beginnen (z. B. Überschrift „M5 …“), sonst das erste Vorkommen als ganzes Wort.
+ * Das Ende ist exklusiv: der gefundene End-Abschnitt gehört nicht mehr dazu.
+ */
+export function findRange(pages: Page[], startTerm: string, endTerm: string): RangeResult {
+  const seq: { pageIndex: number; b: Block; text: string }[] = [];
+  pages.forEach((p, pageIndex) =>
+    p.doc?.blocks.forEach((b) => {
+      if (b.type !== 'hidden' && b.text.trim()) seq.push({ pageIndex, b, text: b.text.replace(/\s+/g, ' ').trim() });
+    }),
+  );
+  const find = (term: string, from: number) => {
+    const t = term.replace(/\s+/g, ' ').trim();
+    if (!t) return -1;
+    const atStart = new RegExp(`^[^\\p{L}\\p{N}]*${escapeRe(t)}(?![\\p{L}\\p{N}])`, 'iu');
+    const anywhere = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(t)}(?![\\p{L}\\p{N}])`, 'iu');
+    for (let i = from; i < seq.length; i++) if (atStart.test(seq[i].text)) return i;
+    for (let i = from; i < seq.length; i++) if (anywhere.test(seq[i].text)) return i;
+    return -1;
+  };
+  const hit = (i: number): RangeHit | null =>
+    i < 0 ? null : { pageIndex: seq[i].pageIndex, blockId: seq[i].b.id, preview: seq[i].text.slice(0, 60) };
+  const si = find(startTerm, 0);
+  const ei = find(endTerm, si < 0 ? 0 : si + 1);
+  return {
+    start: hit(si),
+    end: hit(ei),
+    startMissing: !!startTerm.trim() && si < 0,
+    endMissing: !!endTerm.trim() && ei < 0,
+  };
+}
+
 function buildItems(pages: Page[], settings: Settings): Item[] {
   const items: Item[] = [];
   let firstWithContent = true;
+  const range = findRange(pages, settings.rangeStart ?? '', settings.rangeEnd ?? '');
+  let inside = !range.start; // ohne Startbegriff: von Anfang an
+  let done = false;
   pages.forEach((page, srcIndex) => {
-    if (!page.doc) return;
-    const blocks = page.doc.blocks.filter((b) => b.type !== 'hidden' && b.text.trim().length);
+    if (!page.doc || done) return;
+    const blocks = page.doc.blocks.filter((b) => {
+      if (done) return false;
+      if (range.end && b.id === range.end.blockId) {
+        done = true;
+        return false;
+      }
+      if (!inside && range.start && b.id === range.start.blockId) inside = true;
+      return inside && b.type !== 'hidden' && b.text.trim().length;
+    });
     blocks.forEach((b: Block, bi) => {
       const raw = b.text.split('\n');
       let lines: SrcLine[] = raw.map((t, i) => ({ text: sanitize(t), origNo: b.lineNos[i] ?? null }));
@@ -141,7 +200,7 @@ export async function buildPdf(
 
   if (settings.pdfMode === 'image') {
     if (!images) throw new Error('Keine Bildquelle für den Bildmodus');
-    await buildImagePdf(pdf, pages, regular, images);
+    await buildImagePdf(pdf, pages, regular, images, settings);
   } else {
     layoutText(pdf, pages, settings, { regular, bold, italic });
   }
@@ -268,7 +327,12 @@ function layoutText(
 }
 
 /** Originalbild je Seite mit unsichtbarer, durchsuchbarer Textebene. */
-async function buildImagePdf(pdf: PDFDocument, pages: Page[], font: PDFFont, images: ImageProvider) {
+async function buildImagePdf(pdf: PDFDocument, allPages: Page[], font: PDFFont, images: ImageProvider, settings: Settings) {
+  // Bereich seitenweise: von der Seite mit dem Startbegriff bis zur Seite mit dem Endbegriff
+  const r = findRange(allPages, settings.rangeStart ?? '', settings.rangeEnd ?? '');
+  const first = r.start?.pageIndex ?? 0;
+  const last = r.end ? r.end.pageIndex : allPages.length - 1;
+  const pages = allPages.slice(first, last + 1);
   for (const p of pages) {
     const img = await images(p);
     const embedded = await pdf.embedJpg(img.bytes);

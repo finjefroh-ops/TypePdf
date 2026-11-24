@@ -2,7 +2,8 @@ import { createWorker, OEM, type Worker } from 'tesseract.js';
 import { prepareOcrImage, preprocessForOcr } from './image';
 import { computeDewarp } from './dewarp';
 import { analyzeOcr, type MarginWords, type OBlock, type OWord } from './analyze';
-import type { Page, PageDoc, Settings } from '../types';
+import type { Block, Box, Page, PageDoc, Settings } from '../types';
+import { buildDocVocab, loadLexicon, suggestForBlocks } from './correct';
 import { transformKey } from '../types';
 
 let workerPromise: Promise<Worker> | null = null;
@@ -38,8 +39,10 @@ export function warmUpOcr() {
 /** Führt die Texterkennung für eine Seite aus (Aufrufe werden nacheinander abgearbeitet). */
 export async function recognizePage(
   page: Page,
-  settings: Pick<Settings, 'preprocess' | 'psm'>,
+  settings: Pick<Settings, 'preprocess' | 'psm' | 'autocorrect' | 'uncertainThreshold'>,
   onProgress: (p: number, status: string) => void,
+  /** Text der übrigen Seiten – liefert Wortschatz und Zusammenhang für Korrekturen */
+  otherPages: Block[][] = [],
 ): Promise<PageDoc> {
   onProgress(0.02, 'Bild wird vorbereitet');
   let color = await prepareOcrImage(page);
@@ -83,25 +86,38 @@ export async function recognizePage(
     const a = analyzeOcr(raw, canvas.width, canvas.height, margins);
     // Zeilenpositionen zurück ins (nicht entzerrte) Seitenbild rechnen
     if (warp) {
-      for (const b of a.blocks)
-        b.lineBoxes = b.lineBoxes.map((bx) => {
-          const pts = [
-            warp.toSource(bx.x0 * W, bx.y0 * H),
-            warp.toSource(bx.x1 * W, bx.y0 * H),
-            warp.toSource(bx.x0 * W, bx.y1 * H),
-            warp.toSource(bx.x1 * W, bx.y1 * H),
-          ];
-          return {
-            x0: bx.x0,
-            x1: bx.x1,
-            y0: Math.max(0, Math.min(...pts.map((p) => p.y)) / H),
-            y1: Math.min(1, Math.max(...pts.map((p) => p.y)) / H),
-          };
-        });
+      const back = (bx: Box): Box => {
+        const pts = [
+          warp.toSource(bx.x0 * W, bx.y0 * H),
+          warp.toSource(bx.x1 * W, bx.y0 * H),
+          warp.toSource(bx.x0 * W, bx.y1 * H),
+          warp.toSource(bx.x1 * W, bx.y1 * H),
+        ];
+        return {
+          x0: bx.x0,
+          x1: bx.x1,
+          y0: Math.max(0, Math.min(...pts.map((p) => p.y)) / H),
+          y1: Math.min(1, Math.max(...pts.map((p) => p.y)) / H),
+        };
+      };
+      for (const b of a.blocks) {
+        b.lineBoxes = b.lineBoxes.map(back);
+        b.marks = b.marks.map((m) => (m.box ? { ...m, box: back(m.box) } : m));
+      }
+    }
+    // Korrekturvorschläge (und auf Wunsch eindeutige Autokorrekturen) aus Wortliste und Zusammenhang
+    let blocks = a.blocks;
+    try {
+      onProgress(0.99, 'Korrekturvorschläge');
+      const lex = await loadLexicon();
+      const vocab = buildDocVocab([blocks, ...otherPages]);
+      blocks = suggestForBlocks(blocks, lex, vocab, settings.uncertainThreshold, settings.autocorrect);
+    } catch (e) {
+      console.warn('Korrekturvorschläge nicht verfügbar', e);
     }
     onProgress(1, 'Fertig');
     return {
-      blocks: a.blocks,
+      blocks,
       origPageNo: a.origPageNo,
       meanConf: a.meanConf,
       transformKey: transformKey(page),

@@ -1,5 +1,5 @@
 import { forwardRef, useImperativeHandle, useLayoutEffect, useMemo, useRef } from 'react';
-import type { Mark } from '../types';
+import { needsReview, type Mark } from '../types';
 
 interface Props {
   text: string;
@@ -7,6 +7,8 @@ interface Props {
   lineNos: (string | null)[];
   threshold: number;
   showGutter: boolean;
+  /** Startposition der gerade geprüften Stelle */
+  current?: number | null;
   className?: string;
   onChange: (text: string) => void;
   onFocus?: () => void;
@@ -25,7 +27,7 @@ export interface HighlightHandle {
  * Die Markierungen liegen in einer Ebene hinter dem (transparenten) Textfeld.
  */
 export const HighlightTextarea = forwardRef<HighlightHandle, Props>(function HighlightTextarea(
-  { text, marks, lineNos, threshold, showGutter, className, onChange, onFocus, onCaret, ariaLabel },
+  { text, marks, lineNos, threshold, showGutter, current, className, onChange, onFocus, onCaret, ariaLabel },
   ref,
 ) {
   const ta = useRef<HTMLTextAreaElement>(null);
@@ -56,18 +58,19 @@ export const HighlightTextarea = forwardRef<HighlightHandle, Props>(function Hig
   }, [text]);
 
   const segments = useMemo(() => {
-    const visible = marks.filter((m) => m.conf < threshold && m.end <= text.length).sort((a, b) => a.start - b.start);
+    const visible = marks.filter((m) => needsReview(m, threshold) && m.end <= text.length).sort((a, b) => a.start - b.start);
     const out: { t: string; cls?: string; title?: string }[] = [];
     let pos = 0;
     for (const m of visible) {
       if (m.start < pos) continue;
       if (m.start > pos) out.push({ t: text.slice(pos, m.start) });
-      out.push({ t: text.slice(m.start, m.end), cls: m.conf < 50 ? 'bad' : 'low', title: `Sicherheit ${m.conf} %` });
+      const kind = m.orig !== undefined ? 'fix' : m.conf < 50 ? 'bad' : 'low';
+      out.push({ t: text.slice(m.start, m.end), cls: kind + (m.start === current ? ' cur' : ''), title: `Sicherheit ${m.conf} %` });
       pos = m.end;
     }
     out.push({ t: text.slice(pos) + '\n' });
     return out;
-  }, [text, marks, threshold]);
+  }, [text, marks, threshold, current]);
 
   const lineCount = text.split('\n').length;
   const hasLineNos = lineNos.some(Boolean);

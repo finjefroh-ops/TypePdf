@@ -24,7 +24,18 @@ export interface Mark {
   end: number;
   /** OCR-Konfidenz 0..100 */
   conf: number;
+  /** Korrekturvorschläge aus Wortliste und Textzusammenhang */
+  sugg?: string[];
+  /** Ursprünglich erkannter Text, falls automatisch korrigiert */
+  orig?: string;
+  /** Position des Wortes im Seitenbild (normalisiert) */
+  box?: Box;
+  /** Wort steht nicht im Wörterbuch (wird unabhängig von der Schwelle zur Prüfung angezeigt) */
+  unknown?: boolean;
 }
+
+/** Soll diese Markierung zur Prüfung angezeigt werden? */
+export const needsReview = (m: Mark, threshold: number) => m.conf < threshold || m.orig !== undefined || !!m.unknown;
 
 export interface Block {
   id: string;
@@ -90,12 +101,17 @@ export interface Settings {
   uncertainThreshold: number;
   preprocess: boolean;
   psm: '3' | '4' | '6';
+  /** Eindeutige OCR-Fehler automatisch korrigieren (bleibt markiert und umkehrbar) */
+  autocorrect: boolean;
+  /** PDF nur ab bzw. bis zu dieser Textstelle, z. B. „M5“ */
+  rangeStart: string;
+  rangeEnd: string;
 }
 
 export const defaultSettings: Settings = {
   fileName: 'Dokument',
   pdfMode: 'text',
-  fontSize: 11,
+  fontSize: 12,
   lineBreaks: 'original',
   pageBreakPerSource: true,
   pageNumbers: 'center',
@@ -105,6 +121,9 @@ export const defaultSettings: Settings = {
   uncertainThreshold: 80,
   preprocess: true,
   psm: '3',
+  autocorrect: true,
+  rangeStart: '',
+  rangeEnd: '',
 };
 
 export const transformKey = (p: Pick<Page, 'rotation' | 'skew' | 'crop'>) =>

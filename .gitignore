@@ -26,3 +26,4 @@ dist-ssr
 # Aus node_modules kopierte OCR-Dateien (npm run setup)
 public/ocr
 test-output
+public/lexicon

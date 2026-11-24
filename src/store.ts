@@ -16,6 +16,9 @@ interface State {
   ocrRunning: boolean;
   ocrStatus: string;
   savedAt: number | null;
+  /** Aktuell in der Prüfleiste angezeigte Stelle */
+  review: { pageId: string; blockId: string; start: number } | null;
+  setReview: (r: State['review']) => void;
 
   setStep: (s: Step) => void;
   addFiles: (files: File[]) => Promise<void>;
@@ -73,6 +76,8 @@ export const useStore = create<State>((set, get) => {
     ocrRunning: false,
     ocrStatus: '',
     savedAt: null,
+    review: null,
+    setReview: (review) => set({ review }),
 
     setStep: (step) => set({ step }),
 
@@ -212,9 +217,15 @@ export const useStore = create<State>((set, get) => {
         if (!page) continue;
         get().updatePage(id, { status: 'running', progress: 0 });
         try {
-          const doc: PageDoc = await recognizePage(page, get().settings, (progress, status) => {
-            set((s) => ({ ocrStatus: status, pages: s.pages.map((p) => (p.id === id ? { ...p, progress } : p)) }));
-          });
+          const others = get().pages.filter((p) => p.id !== id && p.doc).map((p) => p.doc!.blocks);
+          const doc: PageDoc = await recognizePage(
+            page,
+            get().settings,
+            (progress, status) => {
+              set((s) => ({ ocrStatus: status, pages: s.pages.map((p) => (p.id === id ? { ...p, progress } : p)) }));
+            },
+            others,
+          );
           get().updatePage(id, { doc, status: 'done', progress: 1 });
         } catch (e) {
           console.error(e);
@@ -259,9 +270,11 @@ export async function hydrate() {
     const data = (await idbGet(STORAGE_KEY)) as Persisted | undefined;
     if (data?.pages?.length) {
       const pages: Page[] = data.pages.map((p) => ({ ...p, status: p.doc ? 'done' : 'idle', progress: p.doc ? 1 : 0 }));
+      // Ältere Projekte: neue Standardschrift Arial 12 pt übernehmen
+      const migrated = data.settings && (data.settings as Partial<Settings>).autocorrect === undefined ? { fontSize: 12 } : {};
       useStore.setState({
         pages,
-        settings: { ...defaultSettings, ...data.settings },
+        settings: { ...defaultSettings, ...data.settings, ...migrated },
         activePageId: data.activePageId,
         step: data.step ?? 'pages',
       });

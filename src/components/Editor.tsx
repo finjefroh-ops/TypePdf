@@ -12,11 +12,13 @@ import {
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { isStale, useStore } from '../store';
-import type { Block, BlockType, Page, PageDoc } from '../types';
-import { renderTransformed, canvasToBlob } from '../lib/image';
+import { needsReview, type Block, type BlockType, type Box, type Page, type PageDoc } from '../types';
 import { applyTextEdit, mergeBlocks, splitBlock } from '../lib/textedit';
 import { newId } from '../lib/analyze';
 import { HighlightTextarea, type HighlightHandle } from './HighlightTextarea';
+import { Switch } from './Switch';
+import { ReviewBar } from './ReviewBar';
+import { usePageImage } from './usePageImage';
 import {
   IconCheck,
   IconChevronDown,
@@ -49,7 +51,6 @@ export function Editor() {
   const pages = useStore((s) => s.pages);
   const activeId = useStore((s) => s.activePageId);
   const setActive = useStore((s) => s.setActive);
-  const ocrRunning = useStore((s) => s.ocrRunning);
   const threshold = useStore((s) => s.settings.uncertainThreshold);
   const updateSettings = useStore((s) => s.updateSettings);
 
@@ -70,7 +71,7 @@ export function Editor() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-4 px-4 py-5 sm:px-6">
+    <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-4 px-4 pt-5 pb-72 sm:px-6">
       <OcrProgress />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -113,17 +114,17 @@ export function Editor() {
           <span className="inline-flex items-center gap-1.5 text-muted" data-testid="uncertain-total">
             <span className="inline-block h-3 w-3 rounded-sm bg-warn" /> {totalUncertain} unsichere Stellen gesamt
           </span>
-          {ocrRunning ? null : <NextUncertainButton />}
         </div>
       </div>
 
       <PageEditor key={page.id} page={page} index={index} />
+      <ReviewBar />
     </div>
   );
 }
 
 function countUncertain(doc: PageDoc, threshold: number) {
-  return doc.blocks.reduce((n, b) => n + (b.type === 'hidden' ? 0 : b.marks.filter((m) => m.conf < threshold).length), 0);
+  return doc.blocks.reduce((n, b) => n + (b.type === 'hidden' ? 0 : b.marks.filter((m) => needsReview(m, threshold)).length), 0);
 }
 
 function OcrProgress() {
@@ -157,58 +158,10 @@ function OcrProgress() {
 /* ---------- Navigation zu unsicheren Stellen ---------- */
 
 const textareaRefs = new Map<string, HighlightHandle>();
-let pendingSelect: { blockId: string; start: number; end: number } | null = null;
-let lastJump: { pageId: string; blockId: string; start: number } | null = null;
 /** Neu eingefügter Abschnitt, der nach dem Rendern den Cursor bekommt */
 let pendingFocus: string | null = null;
 
 const emptyBlock = (type: BlockType = 'p'): Block => ({ id: newId(), type, text: '', marks: [], lineNos: [null], lineBoxes: [] });
-
-function NextUncertainButton() {
-  const pages = useStore((s) => s.pages);
-  const activeId = useStore((s) => s.activePageId);
-  const setActive = useStore((s) => s.setActive);
-  const threshold = useStore((s) => s.settings.uncertainThreshold);
-
-  const jump = () => {
-    // Alle Stellen in Dokumentreihenfolge: [Seite, Abschnitt, Position]
-    const all: { pageId: string; blockId: string; start: number; end: number; key: [number, number, number] }[] = [];
-    pages.forEach((p, pi) =>
-      (p.doc?.blocks ?? []).forEach((b, bi) => {
-        if (b.type === 'hidden') return;
-        for (const m of b.marks)
-          if (m.conf < threshold) all.push({ pageId: p.id, blockId: b.id, start: m.start, end: m.end, key: [pi, bi, m.start] });
-      }),
-    );
-    if (!all.length) return;
-    all.sort((x, y) => x.key[0] - y.key[0] || x.key[1] - y.key[1] || x.key[2] - y.key[2]);
-    const after = (k: [number, number, number], l: [number, number, number]) =>
-      k[0] !== l[0] ? k[0] > l[0] : k[1] !== l[1] ? k[1] > l[1] : k[2] > l[2];
-    let from: [number, number, number];
-    const lj = lastJump;
-    const lastPi = lj ? pages.findIndex((p) => p.id === lj.pageId) : -1;
-    if (lj && lastPi >= 0 && pages[lastPi].id === activeId) {
-      const bi = pages[lastPi].doc?.blocks.findIndex((b) => b.id === lj.blockId) ?? -1;
-      from = [lastPi, bi, lj.start];
-    } else {
-      from = [Math.max(0, pages.findIndex((p) => p.id === activeId)), -1, -1];
-    }
-    const target = all.find((a) => after(a.key, from)) ?? all[0];
-    lastJump = { pageId: target.pageId, blockId: target.blockId, start: target.start };
-    if (target.pageId !== activeId) {
-      pendingSelect = target;
-      setActive(target.pageId);
-    } else {
-      textareaRefs.get(target.blockId)?.select(target.start, target.end);
-    }
-  };
-
-  return (
-    <button className="btn" onClick={jump} data-testid="next-uncertain">
-      <IconWarn /> Nächste unsichere Stelle
-    </button>
-  );
-}
 
 /* ---------- Seite ---------- */
 
@@ -216,6 +169,7 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
   const setBlocks = useStore((s) => s.setBlocks);
   const updatePage = useStore((s) => s.updatePage);
   const moveBlockToPage = useStore((s) => s.moveBlockToPage);
+  const review = useStore((s) => s.review);
   const prevPage = useStore((s) => s.pages[index - 1]);
   const nextPage = useStore((s) => s.pages[index + 1]);
   const runOcr = useStore((s) => s.runOcr);
@@ -225,14 +179,6 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
   const carets = useRef(new Map<string, number>());
   const doc = page.doc;
   const stale = isStale(page);
-
-  useEffect(() => {
-    if (pendingSelect && doc?.blocks.some((b) => b.id === pendingSelect!.blockId)) {
-      const t = pendingSelect;
-      pendingSelect = null;
-      window.setTimeout(() => textareaRefs.get(t.blockId)?.select(t.start, t.end), 50);
-    }
-  }, [doc]);
 
   const blocks = doc?.blocks ?? [];
   const setB = (next: Block[]) => setBlocks(page.id, next);
@@ -299,7 +245,11 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
   return (
     <div className="grid min-h-0 grid-cols-1 gap-4 lg:grid-cols-2">
       {/* Links: Originalbild */}
-      <ImagePane page={page} highlight={focusedBlock} />
+      <ImagePane
+        page={page}
+        highlight={focusedBlock}
+        wordBox={review?.pageId === page.id ? (blocks.find((b) => b.id === review.blockId)?.marks.find((m) => m.start === review.start)?.box ?? null) : null}
+      />
 
       {/* Rechts: Text */}
       <div className="card flex min-w-0 flex-col">
@@ -320,7 +270,7 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
               <button
                 className="btn-ghost"
                 title="Alle Markierungen dieser Seite als geprüft entfernen"
-                onClick={() => setB(blocks.map((b) => ({ ...b, marks: b.marks.filter((m) => m.conf >= threshold) })))}
+                onClick={() => setB(blocks.map((b) => ({ ...b, marks: b.marks.filter((m) => !needsReview(m, threshold)) })))}
               >
                 <IconCheck /> Seite geprüft
               </button>
@@ -348,24 +298,20 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
         )}
 
         {index > 0 && doc && (
-          <div className="flex flex-wrap gap-x-5 gap-y-1 border-b border-line px-4 py-2 text-xs text-muted">
-            <label className="flex items-center gap-1.5">
-              <input
-                type="checkbox"
-                checked={page.joinWithPrevious}
-                onChange={(e) => updatePage(page.id, { joinWithPrevious: e.target.checked, continueParagraph: e.target.checked && page.continueParagraph })}
-              />
-              Mit vorheriger Seite zusammenführen (kein Seitenumbruch)
-            </label>
-            <label className={`flex items-center gap-1.5 ${page.joinWithPrevious ? '' : 'opacity-40'}`}>
-              <input
-                type="checkbox"
-                disabled={!page.joinWithPrevious}
-                checked={page.continueParagraph}
-                onChange={(e) => updatePage(page.id, { continueParagraph: e.target.checked })}
-              />
-              Ersten Absatz fortsetzen
-            </label>
+          <div className="grid grid-cols-1 gap-x-6 border-b border-line px-4 py-2 sm:grid-cols-2">
+            <Switch
+              checked={page.joinWithPrevious}
+              onChange={(v) => updatePage(page.id, { joinWithPrevious: v, continueParagraph: v && page.continueParagraph })}
+              label="An vorherige Seite anschließen"
+              hint="kein Seitenumbruch im PDF"
+            />
+            <Switch
+              checked={page.continueParagraph}
+              disabled={!page.joinWithPrevious}
+              onChange={(v) => updatePage(page.id, { continueParagraph: v })}
+              label="Ersten Absatz fortsetzen"
+              hint="Absatz läuft über die Seitengrenze"
+            />
           </div>
         )}
 
@@ -406,6 +352,7 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
                   last={bi === blocks.length - 1}
                   canUp={bi > 0 || !!prevPage?.doc}
                   canDown={bi < blocks.length - 1 || !!nextPage?.doc}
+                  current={review && review.blockId === b.id ? review.start : null}
                   threshold={threshold}
                   focused={focused === b.id}
                   onFocus={() => setFocused(b.id)}
@@ -413,7 +360,7 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
                   onText={(t) => updateBlock(b.id, (old) => applyTextEdit(old, t))}
                   onType={(type) => updateBlock(b.id, (old) => ({ ...old, type, note: type === 'hidden' ? old.note : undefined }))}
                   onPageBreak={() => updateBlock(b.id, (old) => ({ ...old, pageBreakBefore: !old.pageBreakBefore }))}
-                  onChecked={() => updateBlock(b.id, (old) => ({ ...old, marks: old.marks.filter((m) => m.conf >= threshold) }))}
+                  onChecked={() => updateBlock(b.id, (old) => ({ ...old, marks: old.marks.filter((m) => !needsReview(m, threshold)) }))}
                   onUp={() => move(bi, -1)}
                   onDown={() => move(bi, 1)}
                   onInsertBelow={() => insertAt(bi + 1)}
@@ -462,6 +409,8 @@ function BlockRow(props: {
   last: boolean;
   canUp: boolean;
   canDown: boolean;
+  /** Startposition der gerade in der Prüfleiste angezeigten Stelle in diesem Abschnitt */
+  current?: number | null;
   threshold: number;
   focused: boolean;
   onFocus: () => void;
@@ -479,7 +428,7 @@ function BlockRow(props: {
 }) {
   const { block: b, threshold } = props;
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: b.id });
-  const uncertain = b.marks.filter((m) => m.conf < threshold).length;
+  const uncertain = b.marks.filter((m) => needsReview(m, threshold)).length;
   const hidden = b.type === 'hidden';
   const textCls =
     b.type === 'h1' ? 'font-semibold [&_.hl-input]:text-[18px] [&_.hl-backdrop]:text-[18px]' : b.type === 'h2' ? 'font-semibold' : b.type === 'footnote' ? '[&_.hl-input]:text-[13px] [&_.hl-backdrop]:text-[13px]' : '';
@@ -490,6 +439,7 @@ function BlockRow(props: {
       style={{ transform: CSS.Translate.toString(transform), transition, zIndex: isDragging ? 20 : undefined, position: 'relative' }}
       className={`flex flex-col ${isDragging ? 'opacity-90 shadow-lg' : ''}`}
       data-testid="block-row"
+      data-block-id={b.id}
     >
       {b.pageBreakBefore && (
         <div className="my-1 flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted">
@@ -562,6 +512,7 @@ function BlockRow(props: {
           lineNos={b.lineNos}
           threshold={threshold}
           showGutter
+          current={props.current ?? null}
           className={textCls}
           onChange={props.onText}
           onFocus={props.onFocus}
@@ -575,48 +526,24 @@ function BlockRow(props: {
 
 /* ---------- Bildansicht ---------- */
 
-const imageCache = new Map<string, string>();
-
-function ImagePane({ page, highlight }: { page: Page; highlight: Block | null }) {
-  const [url, setUrl] = useState<string | null>(null);
+function ImagePane({ page, highlight, wordBox }: { page: Page; highlight: Block | null; wordBox: Box | null }) {
+  const url = usePageImage(page);
   const [zoom, setZoom] = useState(1);
-  const key = `${page.id}:${page.rotation}:${page.skew}:${JSON.stringify(page.crop)}:${page.blob.size}`;
   const scroller = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const cached = imageCache.get(key);
-    if (cached) {
-      setUrl(cached);
-      return;
-    }
-    setUrl(null);
-    renderTransformed(page, 2000)
-      .then((c) => canvasToBlob(c, 'image/jpeg', 0.88))
-      .then((b) => {
-        if (cancelled) return;
-        const u = URL.createObjectURL(b);
-        imageCache.set(key, u);
-        setUrl(u);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [key, page]);
 
   const boxes = highlight?.lineBoxes ?? [];
   const showBoxes = !isStale(page);
 
   useEffect(() => {
-    // Zur hervorgehobenen Stelle scrollen
-    if (!boxes.length || !scroller.current || !showBoxes) return;
+    // Zur hervorgehobenen Stelle scrollen (aktuelles Wort hat Vorrang)
+    const target = wordBox ?? boxes[0];
+    if (!target || !scroller.current || !showBoxes) return;
     const el = scroller.current;
     const inner = el.firstElementChild as HTMLElement | null;
     if (!inner) return;
-    const y = boxes[0].y0 * inner.offsetHeight - el.clientHeight / 3;
+    const y = target.y0 * inner.offsetHeight - el.clientHeight / 3;
     el.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
-  }, [highlight?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [highlight?.id, wordBox?.x0, wordBox?.y0]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="card flex min-h-[40vh] flex-col overflow-hidden lg:sticky lg:top-[72px] lg:h-[calc(100dvh-96px)]">
@@ -650,6 +577,17 @@ function ImagePane({ page, highlight }: { page: Page; highlight: Block | null })
                 }}
               />
             ))}
+          {url && showBoxes && wordBox && (
+            <div
+              className="pointer-events-none absolute rounded-sm ring-2 ring-blue"
+              style={{
+                left: `${wordBox.x0 * 100 - 0.3}%`,
+                top: `${wordBox.y0 * 100 - 0.2}%`,
+                width: `${(wordBox.x1 - wordBox.x0) * 100 + 0.6}%`,
+                height: `${(wordBox.y1 - wordBox.y0) * 100 + 0.4}%`,
+              }}
+            />
+          )}
         </div>
       </div>
     </div>

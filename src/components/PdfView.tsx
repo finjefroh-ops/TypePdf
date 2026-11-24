@@ -3,8 +3,10 @@ import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { useStore } from '../store';
-import type { Settings } from '../types';
+import { needsReview, type Settings } from '../types';
 import { createPdf, downloadBytes, safeFileName } from '../lib/exporter';
+import { findRange } from '../lib/pdf';
+import { Switch } from './Switch';
 import { IconDownload, IconSpinner, IconWarn } from './Icons';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -61,7 +63,7 @@ export function PdfView() {
 
   const withoutText = pages.filter((p) => !p.doc).length;
   const uncertain = pages.reduce(
-    (n, p) => n + (p.doc?.blocks.reduce((m, b) => m + (b.type === 'hidden' ? 0 : b.marks.filter((x) => x.conf < settings.uncertainThreshold).length), 0) ?? 0),
+    (n, p) => n + (p.doc?.blocks.reduce((m, b) => m + (b.type === 'hidden' ? 0 : b.marks.filter((x) => needsReview(x, settings.uncertainThreshold)).length), 0) ?? 0),
     0,
   );
   const hasOrigLineNos = pages.some((p) => p.doc?.blocks.some((b) => b.lineNos.some(Boolean)));
@@ -112,6 +114,33 @@ export function PdfView() {
           )}
         </div>
 
+        <div className="card flex flex-col gap-3 p-4 text-sm" data-testid="range-card">
+          <span className="label">Bereich</span>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted">Ab</span>
+              <input
+                className="field"
+                value={settings.rangeStart}
+                onChange={(e) => set('rangeStart', e.target.value)}
+                placeholder="z. B. M5"
+                data-testid="range-start"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted">Bis vor</span>
+              <input
+                className="field"
+                value={settings.rangeEnd}
+                onChange={(e) => set('rangeEnd', e.target.value)}
+                placeholder="z. B. M7"
+                data-testid="range-end"
+              />
+            </label>
+          </div>
+          <RangeInfo />
+        </div>
+
         <div className="card flex flex-col gap-4 p-4 text-sm">
           <Group label="Ausgabe">
             <Seg
@@ -131,16 +160,17 @@ export function PdfView() {
 
           {textMode && (
             <>
-              <Group label="Schriftgröße">
+              <Group label="Schrift">
                 <Seg
                   value={String(settings.fontSize)}
                   onChange={(v) => set('fontSize', Number(v))}
                   options={[
-                    ['10.5', '10,5 pt'],
                     ['11', '11 pt'],
                     ['11.5', '11,5 pt'],
+                    ['12', '12 pt'],
                   ]}
                 />
+                <p className="text-xs text-muted">Arial-Schnitt (Liberation Sans – maßgleich zu Arial, frei einbettbar).</p>
               </Group>
 
               <Group label="Zeilenumbrüche">
@@ -159,10 +189,7 @@ export function PdfView() {
                 </p>
               </Group>
 
-              <label className="flex items-center gap-2">
-                <input type="checkbox" checked={settings.pageBreakPerSource} onChange={(e) => set('pageBreakPerSource', e.target.checked)} />
-                Jede Vorlagenseite auf neuer PDF-Seite
-              </label>
+              <Switch checked={settings.pageBreakPerSource} onChange={(v) => set('pageBreakPerSource', v)} label="Jede Vorlagenseite auf neuer PDF-Seite" />
 
               <Group label="Seitenzahlen">
                 <Seg
@@ -314,19 +341,40 @@ function Seg<T extends string>({
   options: [T, string, boolean?][];
 }) {
   return (
-    <div className="flex rounded-md bg-neutral-100 p-0.5">
+    <div className="flex rounded-[9px] bg-black/[0.06] p-[2px]">
       {options.map(([v, l, disabled]) => (
         <button
           key={v}
           disabled={disabled}
           onClick={() => onChange(v)}
-          className={`flex-1 rounded px-2 py-1 text-xs transition-colors disabled:opacity-35 ${
-            value === v ? 'bg-white font-medium text-ink shadow-sm' : 'text-muted hover:text-ink'
+          className={`min-h-8 flex-1 rounded-[7px] px-2 py-1 text-[13px] transition-all disabled:opacity-35 ${
+            value === v ? 'bg-white font-medium text-ink shadow-[0_1px_3px_rgba(0,0,0,0.12),0_0_0_0.5px_rgba(0,0,0,0.04)]' : 'text-ink/70 hover:text-ink'
           }`}
         >
           {l}
         </button>
       ))}
+    </div>
+  );
+}
+
+/** Rückmeldung, wo der PDF-Bereich beginnt und endet. */
+function RangeInfo() {
+  const pages = useStore((s) => s.pages);
+  const start = useStore((s) => s.settings.rangeStart);
+  const end = useStore((s) => s.settings.rangeEnd);
+  const r = useMemo(() => findRange(pages, start, end), [pages, start, end]);
+  if (!start.trim() && !end.trim()) return <p className="text-xs text-muted">Leer lassen für das ganze Dokument. Beginnt das PDF z. B. erst bei „M5“, hier „M5“ eintragen.</p>;
+  const line = (label: string, hit: typeof r.start, missing: boolean, term: string) =>
+    term.trim() ? (
+      <p className={`text-xs ${missing ? 'text-red-700' : 'text-muted'}`} data-testid={`range-${label === 'Beginnt' ? 'start' : 'end'}-info`}>
+        {missing ? `„${term.trim()}“ nicht gefunden.` : `${label} auf Seite ${hit!.pageIndex + 1}: „${hit!.preview}${hit!.preview.length >= 60 ? '…' : ''}“`}
+      </p>
+    ) : null;
+  return (
+    <div className="flex flex-col gap-1">
+      {line('Beginnt', r.start, r.startMissing, start)}
+      {line('Endet vor', r.end, r.endMissing, end)}
     </div>
   );
 }

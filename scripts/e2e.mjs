@@ -277,6 +277,21 @@ async function main() {
 
     const pageTexts = async () =>
       page.$$eval('[data-testid=block-list] textarea', (els) => els.map((e) => e.value));
+    // Text aller Seiten aus dem gespeicherten Projektzustand (Prüfleiste wechselt ggf. die Seite)
+    const pageTextsAll = async () => {
+      await page.waitForTimeout(700);
+      return page.evaluate(async () => {
+        const db = await new Promise((res) => {
+          const r = indexedDB.open('keyval-store');
+          r.onsuccess = () => res(r.result);
+        });
+        const data = await new Promise((res) => {
+          const tx = db.transaction('keyval').objectStore('keyval').get('typepdf-project-v1');
+          tx.onsuccess = () => res(tx.result);
+        });
+        return data.pages.flatMap((p) => (p.doc ? p.doc.blocks.map((b) => b.text) : []));
+      });
+    };
     const pageInfo = async () =>
       page.$$eval('[data-testid=block-list] select', (els) => els.map((e) => e.value));
 
@@ -352,6 +367,7 @@ async function main() {
     const truth5 = [CURVED.heading, CURVED.sub1, ...CURVED.p1, CURVED.sub2, ...CURVED.p2].join(' ');
     const c5 = cer(truth5, norm(t5.join(' ')));
     check(c5 < 0.01, `Gewölbte Seite: CER ${(c5 * 100).toFixed(2)} %`);
+    check(t5.join(' ').includes('versickert'), 'Autokorrektur verändert keine richtigen (seltenen) Wörter („versickert“)');
     const gut5 = await page.$$eval('.hl-gutter div', (els) => els.map((e) => e.textContent).filter(Boolean));
     check(gut5.length === 0, `Gewölbte Seite: keine erfundenen Zeilennummern (${gut5.join(',')})`);
     check(ty5.join(',') === 'h1,h2,p,h2,p', `Gewölbte Seite: Struktur Überschrift/Zwischenüberschrift/Absatz (${ty5.join(',')})`);
@@ -407,17 +423,56 @@ async function main() {
     tx = await pageTexts();
     check(tx[0] !== 'Neue Hauptüberschrift', 'Abschnitt gelöscht');
 
-    // Nächste unsichere Stelle
-    await page.getByLabel('Seite wählen').selectOption({ index: 0 });
-    await page.waitForTimeout(300);
+    // Prüfleiste: schwebt unten, zeigt Bildausschnitt, Vorschläge und Eingabe
     if (marks.length) {
-      await page.locator('[data-testid=next-uncertain]').click();
-      await page.waitForTimeout(600);
-      const sel = await page.evaluate(() => {
-        const el = document.activeElement;
-        return el && el.tagName === 'TEXTAREA' ? el.value.slice(el.selectionStart, el.selectionEnd) : null;
+      await page.waitForSelector('[data-testid=review-bar]');
+      const bar = page.locator('[data-testid=review-bar]');
+      const inView = await bar.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return r.bottom <= window.innerHeight + 1 && r.top > window.innerHeight / 3;
       });
-      check(!!sel, `„Nächste unsichere Stelle“ springt zur Markierung und wählt sie aus („${sel}“)`);
+      check(inView, 'Prüfleiste schwebt unten im sichtbaren Bereich');
+      const count0 = await page.locator('[data-testid=review-count]').textContent();
+      const total0 = Number(count0.split('/')[1]);
+      check(total0 > 0, `Prüfleiste zählt ${total0} Stellen`);
+      check((await page.locator('[data-testid=review-snippet] img').count()) > 0, 'Prüfleiste zeigt Bildausschnitt aus dem Original');
+      await page.screenshot({ path: join(OUT, '06e-pruefleiste.png') });
+      // eigene Korrektur eintippen + Enter → übernommen, nächste Stelle
+      const inp = page.locator('[data-testid=review-input]');
+      await inp.fill('KORREKTURTEST');
+      await inp.press('Enter');
+      await page.waitForTimeout(300);
+      const allText = (await pageTextsAll()).join(' ');
+      check(allText.includes('KORREKTURTEST'), 'Eigene Korrektur aus der Prüfleiste landet im Text');
+      const total1 = Number((await page.locator('[data-testid=review-count]').textContent()).split('/')[1]);
+      check(total1 === total0 - 1, `Nach Korrektur eine Stelle weniger (${total0} → ${total1})`);
+      // „Richtig“ entfernt Markierung ohne Textänderung
+      const before = (await pageTextsAll()).join(' ');
+      const ok = page.locator('[data-testid=review-ok]');
+      if (await ok.count()) {
+        await ok.click();
+        await page.waitForTimeout(300);
+        const total2 = Number((await page.locator('[data-testid=review-count]').textContent()).split('/')[1]);
+        check(total2 === total1 - 1 && (await pageTextsAll()).join(' ') === before, '„Richtig“ entfernt nur die Markierung');
+      }
+      // Weiter blättern ohne Scrollen
+      const c1 = await page.locator('[data-testid=review-count]').textContent();
+      await page.locator('[data-testid=review-next]').click();
+      await page.waitForTimeout(200);
+      check(c1 !== (await page.locator('[data-testid=review-count]').textContent()), 'Prüfleiste blättert zur nächsten Stelle');
+      // Vorschlag übernehmen, falls vorhanden
+      for (let i = 0; i < 25 && !(await page.locator('[data-testid=review-sugg]').count()); i++) {
+        await page.locator('[data-testid=review-next]').click();
+        await page.waitForTimeout(80);
+      }
+      if (await page.locator('[data-testid=review-sugg]').count()) {
+        const sg = await page.locator('[data-testid=review-sugg]').first().textContent();
+        await page.locator('[data-testid=review-sugg]').first().click();
+        await page.waitForTimeout(300);
+        check((await pageTextsAll()).join(' ').includes(sg), `Korrekturvorschlag „${sg}“ übernommen`);
+      }
+      const fixedCount = await page.$$eval('.hl-backdrop mark.fix', (els) => els.length);
+      console.log(`    Autokorrekturen sichtbar markiert: ${fixedCount}`);
     }
 
     // PDF
@@ -454,6 +509,22 @@ async function main() {
     writeFileSync(join(OUT, 'export-original-nummern.txt'), txt2);
     check(/\b23\s*$/m.test(txt2) && /\b24\s*$/m.test(txt2), 'PDF: Buchseitenzahlen 23/24 übernommen');
     await page.screenshot({ path: join(OUT, '08-pdf-original.png') });
+
+    // Bereich „ab …“: PDF beginnt erst bei der Überschrift „Ein Gespräch über Bücher“
+    await page.locator('[data-testid=range-start]').fill('Ein Gespräch');
+    await page.waitForTimeout(300);
+    const rinfo = await page.locator('[data-testid=range-start-info]').textContent();
+    check(rinfo.includes('Seite 3'), `Bereich: Startstelle gefunden (${rinfo})`);
+    await page.waitForTimeout(1800);
+    const [dlr] = await Promise.all([page.waitForEvent('download'), page.locator('[data-testid=download]').click()]);
+    const pdfr = join(OUT, 'export-bereich.pdf');
+    await dlr.saveAs(pdfr);
+    const txr = execFileSync('pdftotext', ['-layout', pdfr, '-']).toString();
+    check(!txr.includes('Bibliothek') && !txr.includes('Klima') && txr.includes('Großmutter'), 'PDF beginnt erst ab dem eingegebenen Begriff');
+    await page.locator('[data-testid=range-start]').fill('M99');
+    await page.waitForTimeout(300);
+    check((await page.locator('[data-testid=range-start-info]').textContent()).includes('nicht gefunden'), 'Bereich: unbekannter Begriff wird gemeldet');
+    await page.locator('[data-testid=range-start]').fill('');
 
     // Bildmodus
     await page.getByRole('button', { name: 'Originalbilder' }).click();

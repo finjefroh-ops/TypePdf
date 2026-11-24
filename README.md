@@ -18,7 +18,7 @@ Die gebaute App ist rein statisch (`dist/`) und kann z. B. über GitHub Pages be
 ## Arbeitsablauf
 
 1. **Seiten** – Bilder (JPG, PNG, WEBP) per Drag-and-drop oder Dateiauswahl laden. Sortierung automatisch nach Dateiname (IMG_2 vor IMG_10), danach per Ziehen änderbar oder nach erkannten Buchseitenzahlen. Drehen, Zuschneiden, Begradigen (manuell oder automatisch), Ersetzen, Entfernen.
-2. **Text** – Original links, erkannter Text rechts. Unsichere Wörter sind gelb (unter Schwelle) bzw. rot (sehr unsicher) markiert; „Nächste unsichere Stelle“ springt direkt hin und wählt das Wort aus. Wer ein markiertes Wort bearbeitet, bestätigt es damit. Abschnitte lassen sich als Überschrift, Absatz, Fußnote formatieren oder ausblenden, teilen, verbinden und mit Seitenumbrüchen versehen; Seiten lassen sich zusammenführen. Reihenfolge ändern per Ziehen am Griff (⋮⋮) oder mit ↑/↓ – am Seitenanfang bzw. -ende wandert ein Abschnitt auf die vorige bzw. nächste Seite. Neue Abschnitte: „+“ fügt direkt darunter ein, „Überschrift oben einfügen“ ganz oben.
+2. **Text** – Original links, erkannter Text rechts. Unsichere Wörter sind gelb (unter Schwelle) bzw. rot (sehr unsicher) markiert, automatisch korrigierte blau unterstrichen. Die **Prüfleiste** schwebt unten: Bildausschnitt aus dem Original mit umrandetem Wort, Korrekturvorschläge, eigene Eingabe (Enter übernimmt), „Richtig“, „Rückgängig“ für Autokorrekturen, ‹ › zum Blättern – sie springt nach jeder Aktion zur nächsten Stelle, auch über Seiten hinweg. Abschnitte lassen sich als Überschrift, Absatz, Fußnote formatieren oder ausblenden, teilen, verbinden und mit Seitenumbrüchen versehen; Seiten lassen sich zusammenführen. Reihenfolge ändern per Ziehen am Griff (⋮⋮) oder mit ↑/↓ – am Seitenanfang bzw. -ende wandert ein Abschnitt auf die vorige bzw. nächste Seite. Neue Abschnitte: „+“ fügt direkt darunter ein, „Überschrift oben einfügen“ ganz oben.
 3. **PDF** – Live-Vorschau, Einstellungen, Dateiname, Download mit einem Klick.
 
 ## Grundsatz: wortgetreu
@@ -30,16 +30,19 @@ Der erkannte Text wird **nicht** zusammengefasst, umformuliert, korrigiert oder 
 - gedruckte Zeilennummern am Rand – sie werden nur übernommen, wenn sie zur Zeilenabfolge passen (Nummer − Zeilenindex konstant), sonst bleibt die Zahl als Text erhalten
 - Unicode-Ligaturen (ﬁ → fi) werden aufgelöst; sonst bleibt jedes Zeichen, wie es erkannt wurde
 
-Einzige optionale Umformung: Im Modus *Fließtext* werden am Zeilenende getrennte Wörter („Wort-⏎teil“ mit kleinem Folgebuchstaben) zusammengefügt. Im Standardmodus *Wie Vorlage* bleiben alle Zeilen exakt wie im Original.
+**Autokorrektur (abschaltbar):** Lokal, mit einer deutschen Wortliste (≈ 77 000 Wörter nach Häufigkeit, MIT-Lizenz aus `@zxcvbn-ts/language-de`) und dem Wortschatz des eigenen Dokuments. Automatisch ersetzt wird nur, wenn die OCR selbst unsicher war, das erkannte Wort nicht existiert (auch nicht als Zusammensetzung oder gebeugte Form) und genau ein Kandidat über eine typische OCR-Verwechslung (rn↔m, li↔h, i↔l, c↔e …) erreichbar ist. Komma am Absatzende wird zum Punkt. Jede Autokorrektur bleibt blau markiert und ist mit einem Klick rückgängig zu machen. Für alle anderen unsicheren Stellen gibt es nur Vorschläge.
+
+Einzige weitere Umformung (optional): Im Modus *Fließtext* werden am Zeilenende getrennte Wörter („Wort-⏎teil“ mit kleinem Folgebuchstaben) zusammengefügt. Im Standardmodus *Wie Vorlage* bleiben alle Zeilen exakt wie im Original.
 
 Bearbeiteter Text wird nie automatisch überschrieben: erneute Erkennung fragt nach und lässt sich rückgängig machen. Das Projekt wird laufend lokal (IndexedDB) gesichert und nach einem Neuladen wiederhergestellt.
 
 ## PDF
 
-- DIN A4, weißer Hintergrund, schwarze Schrift, Liberation Sans (metrisch kompatibel zu Arial/Helvetica, eingebettet)
-- Fließtext 10,5 / 11 / 11,5 pt, Zeilenabstand 1,45, Ränder 25/20/25/25 mm, automatischer Seitenumbruch (Überschriften bleiben beim folgenden Text, keine einzelne erste Absatzzeile am Seitenende)
+- DIN A4, weißer Hintergrund, schwarze Schrift, Arial-Schnitt: Liberation Sans (maßgleich zu Arial, frei einbettbar – das Original-Arial darf nicht mitgeliefert werden)
+- **Standard 12 pt**, wahlweise 11 / 11,5 pt, Zeilenabstand 1,45, Ränder 25/20/25/25 mm, automatischer Seitenumbruch (Überschriften bleiben beim folgenden Text, keine einzelne erste Absatzzeile am Seitenende)
 - Seitenzahlen: keine / mittig / rechts; fortlaufend (1, 2, 3 …) oder die erkannten Buchseitenzahlen
 - Zeilennummern am linken Rand: neu gezählt (pro Seite oder fortlaufend, **standardmäßig alle 5 Zeilen**, wahlweise jede Zeile) oder die Original-Zeilennummern der Vorlage. Originalnummern stehen *kursiv*, neu gezählte aufrecht – die beiden Arten sind nie gleichzeitig aktiv.
+- **Bereich:** „Ab“ / „Bis vor“ z. B. „M5“ – das PDF beginnt beim Abschnitt, der mit dem Begriff anfängt (z. B. Überschrift „M5 …“); die App zeigt an, wo der Begriff gefunden wurde
 - Ausgabe *Neu gesetzt* (echter Text, durchsuchbar und markierbar) oder *Originalbilder* (Fotos mit unsichtbarer, durchsuchbarer Textebene)
 
 ## Technik
@@ -70,7 +73,7 @@ src/
 
 ```bash
 npm run build && npm test     # End-to-End im Browser (benötigt Playwright + Chromium)
-npx tsx scripts/pdf-test.ts   # Satz-Test: langer Text über viele Seiten, kein Wort darf fehlen
+npm run test:unit             # Korrektur-Test (OCR-Fehler werden korrigiert, richtige Wörter nie) + Satz-Test
 ```
 
 Der End-to-End-Test erzeugt realistische Testfotos (Buchseite mit Randzeilennummern, Fußnote und Seitenzahl; schräg fotografierte Seite mit Schatten; zweispaltige Seite; unscharfes Foto), lädt sie hoch und prüft u. a. Zeichenfehlerrate, Spaltenreihenfolge, Umlaute/ß/„Anführungszeichen“, Zeilennummern, automatische Begradigung, Datenerhalt beim Wechsel der Ansichten, Wiederherstellung nach Neuladen, PDF-Seitenformat, Durchsuchbarkeit und die iPad-Ansicht. Ausgaben (Screenshots, PDFs) landen in `test-output/`.
