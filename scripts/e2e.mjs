@@ -95,6 +95,34 @@ function bookHtml(p, { lineNos = true } = {}) {
   ${p.footnote ? `<div class="fn">${p.footnote}</div>` : ''}<div class="no">${p.pageNo}</div></div></body></html>`;
 }
 
+const CURVED = {
+  heading: 'Exkurs: Wasser als Lebensgrundlage',
+  sub1: 'a) Der Wasserkreislauf in der Natur',
+  p1: [
+    'Wasser verdunstet über Meeren und Seen, steigt als Dampf auf und',
+    'bildet Wolken. Fällt es als Regen zurück, versickert ein Teil im Boden',
+    'und speist das Grundwasser. So schließt sich der Kreislauf.',
+  ],
+  sub2: 'b) Trinkwasser in Deutschland',
+  p2: [
+    'Rund zwei Drittel unseres Trinkwassers stammen aus Grundwasser. Es',
+    'wird in Wasserwerken gereinigt, geprüft und über lange Leitungen zu',
+    'den Haushalten gepumpt. Täglich verbraucht jeder Mensch etwa 125 Liter.',
+  ],
+};
+
+function curvedHtml(p) {
+  const rows = (ls) => ls.map((l) => `<div class="r">${l}</div>`).join('');
+  return `<html><head><style>
+    body{margin:0;background:#f2efe8}
+    .pg{width:1400px;height:1100px;padding:90px 110px;box-sizing:border-box;font-family:'Liberation Sans',Arial,sans-serif;color:#1a1a1a}
+    h1{font-size:40px;color:#1d4f91;font-weight:bold;margin:0 0 26px}
+    .s{font-size:31px;font-weight:bold;margin-top:10px}
+    .r{font-size:31px;line-height:46px;white-space:nowrap}
+  </style></head><body><div class="pg"><h1>${p.heading}</h1>
+  <div class="s">${p.sub1}</div>${rows(p.p1)}<div class="s">${p.sub2}</div>${rows(p.p2)}</div></body></html>`;
+}
+
 function colsHtml(p) {
   return `<html><head><style>
     body{margin:0;background:#fff}
@@ -108,15 +136,30 @@ function colsHtml(p) {
 }
 
 /** Simuliert ein Handyfoto: leichte Drehung, Schatten, Rauschen, JPEG. */
-async function photograph(browser, html, file, { angle = 0, shadow = false, w = 1300, h = 1800, scale = 1, blur = 0 } = {}) {
+async function photograph(browser, html, file, { angle = 0, shadow = false, w = 1300, h = 1800, scale = 1, blur = 0, curve = 0 } = {}) {
   const page = await browser.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 1 });
   await page.setContent(html);
   const png = await page.screenshot({ type: 'png' });
   const dataUrl = await page.evaluate(
-    async ({ b64, angle, shadow, scale, blur }) => {
-      const img = new Image();
+    async ({ b64, angle, shadow, scale, blur, curve }) => {
+      let img = new Image();
       img.src = 'data:image/png;base64,' + b64;
       await img.decode();
+      if (curve) {
+        // Wölbung wie bei einem aufgeschlagenen Buch: Zeilen biegen sich zum Rand hin
+        const cv = document.createElement('canvas');
+        cv.width = img.width;
+        cv.height = img.height;
+        const cx = cv.getContext('2d');
+        cx.fillStyle = '#f2efe8';
+        cx.fillRect(0, 0, cv.width, cv.height);
+        for (let x = 0; x < img.width; x += 2) {
+          const u = x / img.width - 0.5;
+          const dy = curve * (u * u * 4 - 0.3) + curve * 0.35 * u;
+          cx.drawImage(img, x, 0, 2, img.height, x, dy, 2, img.height);
+        }
+        img = cv;
+      }
       const c = document.createElement('canvas');
       c.width = img.width + 160;
       c.height = img.height + 160;
@@ -152,7 +195,7 @@ async function photograph(browser, html, file, { angle = 0, shadow = false, w = 
       x2.drawImage(c, 0, 0, s2.width, s2.height);
       return s2.toDataURL('image/jpeg', 0.6);
     },
-    { b64: png.toString('base64'), angle, shadow, scale, blur },
+    { b64: png.toString('base64'), angle, shadow, scale, blur, curve },
   );
   writeFileSync(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
   await page.close();
@@ -178,10 +221,12 @@ async function main() {
   const f2 = join(OUT, 'IMG_0010.jpg');
   const f3 = join(OUT, 'IMG_0001.jpg');
   const f4 = join(OUT, 'IMG_0020.jpg');
+  const f5 = join(OUT, 'IMG_0030.jpg');
   await photograph(browser, bookHtml(PAGE1), f1, { angle: 0.6 });
   await photograph(browser, bookHtml(PAGE2, { lineNos: true }), f2, { angle: -2.2, shadow: true });
   await photograph(browser, colsHtml(COLS), f3, { w: 1300, h: 1100 });
   await photograph(browser, bookHtml(PAGE2, { lineNos: false }), f4, { angle: 1, scale: 0.38, blur: 0.9 });
+  await photograph(browser, curvedHtml(CURVED), f5, { w: 1400, h: 1100, curve: 34, angle: 1.5, shadow: true });
   console.log('Testbilder erzeugt');
 
   const server = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort'], { stdio: 'pipe' });
@@ -204,11 +249,11 @@ async function main() {
     await page.goto(`http://localhost:${PORT}/`);
     await page.screenshot({ path: join(OUT, '01-start.png') });
 
-    await page.setInputFiles('input[type=file]', [f1, f2, f3, f4]);
+    await page.setInputFiles('input[type=file]', [f1, f2, f3, f4, f5]);
     await page.waitForSelector('[data-testid=page-card] img');
     await page.waitForTimeout(800);
     const names = await page.$$eval('[data-testid=page-card] .truncate', (els) => els.map((e) => e.textContent));
-    check(names.join(',') === 'IMG_0001.jpg,IMG_0002.jpg,IMG_0010.jpg,IMG_0020.jpg', `natürliche Sortierung: ${names.join(', ')}`);
+    check(names.join(',') === 'IMG_0001.jpg,IMG_0002.jpg,IMG_0010.jpg,IMG_0020.jpg,IMG_0030.jpg', `natürliche Sortierung: ${names.join(', ')}`);
     await page.screenshot({ path: join(OUT, '02-seiten.png') });
 
     // Seite 3 (schräg) automatisch begradigen
@@ -227,7 +272,7 @@ async function main() {
     await page.waitForSelector('[data-testid=ocr-progress]', { timeout: 10000 });
     await page.screenshot({ path: join(OUT, '04-ocr-fortschritt.png') });
     await page.waitForSelector('[data-testid=ocr-progress]', { state: 'detached', timeout: 600000 });
-    console.log(`OCR für 4 Seiten: ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    console.log(`OCR für 5 Seiten: ${((Date.now() - t0) / 1000).toFixed(1)} s`);
     await page.waitForTimeout(500);
 
     const pageTexts = async () =>
@@ -299,6 +344,17 @@ async function main() {
     check(c4 < 0.01 || marks.length > 0, 'Unscharfes Foto: Fehler werden als unsicher markiert');
     await page.screenshot({ path: join(OUT, '06b-editor-unsicher.png') });
 
+    // Seite 5: gewölbte Seite mit blauer Überschrift und fetten Zwischenüberschriften
+    await page.getByLabel('Nächste Seite').click();
+    await page.waitForTimeout(400);
+    const t5 = await pageTexts();
+    const ty5 = await pageInfo();
+    const truth5 = [CURVED.heading, CURVED.sub1, ...CURVED.p1, CURVED.sub2, ...CURVED.p2].join(' ');
+    const c5 = cer(truth5, norm(t5.join(' ')));
+    check(c5 < 0.01, `Gewölbte Seite: CER ${(c5 * 100).toFixed(2)} %`);
+    check(ty5.join(',') === 'h1,h2,p,h2,p', `Gewölbte Seite: Struktur Überschrift/Zwischenüberschrift/Absatz (${ty5.join(',')})`);
+    await page.screenshot({ path: join(OUT, '06c-editor-gewoelbt.png') });
+
     // Nächste unsichere Stelle
     await page.getByLabel('Seite wählen').selectOption({ index: 0 });
     await page.waitForTimeout(300);
@@ -326,7 +382,7 @@ async function main() {
     await dl.saveAs(pdfPath);
     const info = execFileSync('pdfinfo', [pdfPath]).toString();
     const pagesN = Number(info.match(/Pages:\s+(\d+)/)[1]);
-    check(pagesN === 4, `PDF hat 4 Seiten (eine je Vorlagenseite): ${pagesN}`);
+    check(pagesN === 5, `PDF hat 5 Seiten (eine je Vorlagenseite): ${pagesN}`);
     check(/595\.\d+ x 841\.\d+/.test(info), 'PDF ist DIN A4');
     const txt = execFileSync('pdftotext', ['-layout', pdfPath, '-']).toString();
     writeFileSync(join(OUT, 'export-text.txt'), txt);

@@ -199,8 +199,11 @@ export function preprocessForOcr(src: HTMLCanvasElement): HTMLCanvasElement {
   return out;
 }
 
-/** Bild für die OCR vorbereiten (Größe angleichen, optional vorverarbeiten). */
-export async function prepareOcrImage(page: TransformInput, preprocess: boolean): Promise<HTMLCanvasElement> {
+/**
+ * Bild für die OCR vorbereiten: Größe angleichen. Liefert die Farbfassung (für die
+ * Erkennung farbiger Überschriften) und die bereinigte Graustufenfassung (für die OCR).
+ */
+export async function prepareOcrImage(page: TransformInput): Promise<HTMLCanvasElement> {
   let c = await renderTransformed(page, 3600);
   const longSide = Math.max(c.width, c.height);
   // Kleine Bilder hochskalieren: Tesseract arbeitet am besten bei ~300 dpi
@@ -212,7 +215,7 @@ export async function prepareOcrImage(page: TransformInput, preprocess: boolean)
     ctx.drawImage(c, 0, 0, up.width, up.height);
     c = up;
   }
-  return preprocess ? preprocessForOcr(c) : c;
+  return c;
 }
 
 /**

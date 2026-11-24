@@ -1,5 +1,6 @@
 import { createWorker, OEM, type Worker } from 'tesseract.js';
-import { prepareOcrImage } from './image';
+import { prepareOcrImage, preprocessForOcr } from './image';
+import { computeDewarp } from './dewarp';
 import { analyzeOcr, type MarginWords, type OBlock, type OWord } from './analyze';
 import type { Page, PageDoc, Settings } from '../types';
 import { transformKey } from '../types';
@@ -41,7 +42,18 @@ export async function recognizePage(
   onProgress: (p: number, status: string) => void,
 ): Promise<PageDoc> {
   onProgress(0.02, 'Bild wird vorbereitet');
-  const canvas = await prepareOcrImage(page, settings.preprocess);
+  let color = await prepareOcrImage(page);
+  let clean = preprocessForOcr(color);
+  // Gewölbte/schräge Seiten anhand der Textzeilen glätten
+  onProgress(0.04, 'Seite wird entzerrt');
+  const warp = computeDewarp(clean);
+  if (warp) {
+    color = warp.apply(color);
+    clean = warp.apply(clean);
+  }
+  const canvas = settings.preprocess ? clean : color;
+  const W = canvas.width;
+  const H = canvas.height;
   const worker = await getWorker();
   progressHandler = onProgress;
   try {
@@ -55,11 +67,38 @@ export async function recognizePage(
     if (new URLSearchParams(location.search).has('debug')) {
       (window as unknown as Record<string, unknown>).__ocrRaw = { w: canvas.width, h: canvas.height, blocks: stripRaw(raw) };
     }
+    annotateStyles(raw, clean, color);
+    if (new URLSearchParams(location.search).has('debug'))
+      for (const b of raw)
+        for (const p of b.paragraphs)
+          for (const l of p.lines) {
+            const ws = l.words as unknown as OWord[];
+            const sz = (l as unknown as { rowAttributes?: { rowHeight: number } }).rowAttributes?.rowHeight ?? 0;
+            console.log('STYLE', Math.round(sz), ws.map((w) => `${w.text}[${(w.stroke! / Math.max(1, sz)).toFixed(3)}|${Math.round(w.chroma!)}|${Math.round(w.confidence)}|${Math.round(w.bbox.x0)}]`).join(' ').slice(0, 260));
+          }
     onProgress(0.97, 'Ränder werden geprüft');
     const margins = await scanMargins(worker, canvas, raw);
     if (new URLSearchParams(location.search).has('debug')) console.log('MARGINS', JSON.stringify(margins.map((m) => [m.side, m.words.map((w) => [w.text, Math.round(w.confidence), w.bbox.y0, w.bbox.y1])])));
     await worker.setParameters({ tessedit_pageseg_mode: settings.psm as never } as never);
     const a = analyzeOcr(raw, canvas.width, canvas.height, margins);
+    // Zeilenpositionen zurück ins (nicht entzerrte) Seitenbild rechnen
+    if (warp) {
+      for (const b of a.blocks)
+        b.lineBoxes = b.lineBoxes.map((bx) => {
+          const pts = [
+            warp.toSource(bx.x0 * W, bx.y0 * H),
+            warp.toSource(bx.x1 * W, bx.y0 * H),
+            warp.toSource(bx.x0 * W, bx.y1 * H),
+            warp.toSource(bx.x1 * W, bx.y1 * H),
+          ];
+          return {
+            x0: bx.x0,
+            x1: bx.x1,
+            y0: Math.max(0, Math.min(...pts.map((p) => p.y)) / H),
+            y1: Math.min(1, Math.max(...pts.map((p) => p.y)) / H),
+          };
+        });
+    }
     onProgress(1, 'Fertig');
     return {
       blocks: a.blocks,
@@ -290,4 +329,74 @@ async function readSideNumbers(
     }
   }
   return words;
+}
+
+/**
+ * Misst je Wort Strichstärke (mittlere Länge waagerechter Tintenläufe) und Farbigkeit der
+ * Tinte. Daraus erkennt die Analyse fette und farbige Überschriften.
+ */
+function annotateStyles(raw: OBlock[], clean: HTMLCanvasElement, color: HTMLCanvasElement) {
+  const W = clean.width;
+  const H = clean.height;
+  const g = clean.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, W, H).data;
+  const c = color.width === W && color.height === H ? color.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, W, H).data : null;
+  for (const b of raw)
+    for (const p of b.paragraphs)
+      for (const l of p.lines)
+        for (const w of l.words) {
+          const x0 = Math.max(0, Math.floor(w.bbox.x0));
+          const x1 = Math.min(W - 1, Math.ceil(w.bbox.x1));
+          const y0 = Math.max(0, Math.floor(w.bbox.y0));
+          const y1 = Math.min(H - 1, Math.ceil(w.bbox.y1));
+          const ww = x1 - x0 + 1;
+          const hh = y1 - y0 + 1;
+          if (ww <= 0 || hh <= 0) continue;
+          const dark = new Uint8Array(ww * hh);
+          for (let y = 0; y < hh; y++) for (let x = 0; x < ww; x++) dark[y * ww + x] = g[((y + y0) * W + x + x0) * 4] < 128 ? 1 : 0;
+          // Lauflängen waagerecht und senkrecht je Tintenpixel; Strichdicke = kürzere der beiden
+          const hr = new Uint16Array(ww * hh);
+          for (let y = 0; y < hh; y++) {
+            let x = 0;
+            while (x < ww) {
+              if (!dark[y * ww + x]) { x++; continue; }
+              let e = x;
+              while (e < ww && dark[y * ww + e]) e++;
+              for (let k = x; k < e; k++) hr[y * ww + k] = e - x;
+              x = e;
+            }
+          }
+          const hist = new Uint32Array(64);
+          let ink = 0;
+          let chroma = 0;
+          for (let x = 0; x < ww; x++) {
+            let y = 0;
+            while (y < hh) {
+              if (!dark[y * ww + x]) { y++; continue; }
+              let e = y;
+              while (e < hh && dark[e * ww + x]) e++;
+              for (let k = y; k < e; k++) {
+                const m = Math.min(63, Math.min(hr[k * ww + x], e - y));
+                hist[m]++;
+                ink++;
+                if (c) {
+                  const i = ((k + y0) * W + x + x0) * 4;
+                  chroma += Math.max(c[i], c[i + 1], c[i + 2]) - Math.min(c[i], c[i + 1], c[i + 2]);
+                }
+              }
+              y = e;
+            }
+          }
+          let acc = 0;
+          let med = 0;
+          for (; med < 64; med++) {
+            acc += hist[med];
+            if (acc >= ink / 2) break;
+          }
+          // Mittelwert der Strichdicke (stabiler als der ganzzahlige Median)
+          let sum = 0;
+          for (let m = 0; m < 64; m++) sum += m * hist[m];
+          const ow = w as unknown as OWord;
+          ow.stroke = ink ? sum / ink : 0;
+          ow.chroma = ink ? chroma / ink : 0;
+        }
 }

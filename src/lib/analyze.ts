@@ -16,6 +16,10 @@ export interface OWord {
   text: string;
   confidence: number;
   bbox: OBox;
+  /** mittlere Strichstärke in Pixeln (aus dem Bild gemessen) – Hinweis auf Fettdruck */
+  stroke?: number;
+  /** mittlere Farbigkeit der Schrift (0 = grau/schwarz) – Hinweis auf farbige Überschriften */
+  chroma?: number;
 }
 export interface OLine {
   words: OWord[];
@@ -68,6 +72,9 @@ interface WLine {
   lineNo: string | null;
   /** Schriftgröße (Zeilenhöhe laut OCR) */
   size: number;
+  /** Auszeichnung: fett / farbig */
+  bold?: boolean;
+  colored?: boolean;
 }
 
 const lineH = (l: { bbox: OBox }) => l.bbox.y1 - l.bbox.y0;
@@ -194,50 +201,117 @@ export function analyzeOcr(input: OBlock[], imgW: number, imgH: number, margins:
   for (const p of numberParas)
     for (const nl of p.lines) if (!textLinesOrdered.some((l) => l.lineNo === nl.words[0].text && nearestLine(nl.words[0]) === l)) paras.push({ lines: [nl] });
 
-  // 3a. Fehltrennungen der OCR zusammenführen: gleicher Textblock, normaler Zeilenabstand,
-  //     kein Einzug in der Folgezeile und die vorige Zeile reicht bis zum rechten Rand.
-  const merged: P[] = [];
-  for (const p of paras) {
-    const prev = merged[merged.length - 1];
-    if (prev && prev.blk !== undefined && prev.blk === p.blk) {
-      const a = prev.lines[prev.lines.length - 1];
-      const b = p.lines[0];
-      const blockLeft = Math.min(...prev.lines.map((l) => l.bbox.x0), ...p.lines.map((l) => l.bbox.x0));
-      const blockRight = Math.max(...prev.lines.map((l) => l.bbox.x1), ...p.lines.map((l) => l.bbox.x1));
-      const gap = b.bbox.y0 - a.bbox.y1;
-      const sameSize = Math.abs(a.size - b.size) <= medSize * 0.2;
-      const noIndent = b.bbox.x0 - blockLeft < medH * 0.6;
-      const fullLine = blockRight - a.bbox.x1 < medH * 3;
-      const lineSpacing = gap < medH * 0.6;
-      if (sameSize && noIndent && fullLine && lineSpacing && !/[.!?:“"]$/.test(textOf(a))) {
-        prev.lines.push(...p.lines);
-        continue;
-      }
-    }
-    merged.push({ lines: [...p.lines], blk: p.blk });
+  // 2b. Randstörungen entfernen: Satzzeichen-/Bruchstücke links bzw. rechts außerhalb der Textspalte
+  //     (z. B. gewölbte Nachbarseite, Schatten). Echte Wörter bleiben immer erhalten.
+  const isJunk = (w: OWord) => {
+    const t = w.text.trim();
+    const hasLetters = /[\p{L}]/u.test(t);
+    if (!/[\p{L}\p{N}]/u.test(t)) return true;
+    return w.confidence < 55 && t.length <= 2 && (!hasLetters || w.confidence < 35);
+  };
+  const strokes = textLinesOrdered.flatMap((l) => l.words.filter((w) => w.text.length >= 3 && w.stroke).map((w) => w.stroke!));
+  const medStroke0 = median(strokes);
+  const faint = (w: OWord) => w.stroke !== undefined && medStroke0 > 0 && w.stroke < medStroke0 * 0.75;
+  const edgeJunk = (w: OWord, gap: number) => {
+    const t = w.text.trim();
+    if (gap < medH * 0.25) return false; // hängt am Wort → Teil des Textes
+    // Zeichen ohne Buchstaben/Ziffern: nur entfernen, wenn unsicher oder ohne erkennbare Tinte
+    // (ein echter Gedankenstrich am Zeilenanfang bleibt erhalten)
+    if (!/[\p{L}\p{N}]/u.test(t)) return w.confidence < 75 || w.stroke === 0;
+    return t.length <= 2 && w.confidence < 75 && faint(w);
+  };
+  for (const l of textLinesOrdered) {
+    while (l.words.length > 1 && edgeJunk(l.words[0], l.words[1].bbox.x0 - l.words[0].bbox.x1)) l.words.shift();
+    while (l.words.length > 1 && edgeJunk(l.words[l.words.length - 1], l.words[l.words.length - 1].bbox.x0 - l.words[l.words.length - 2].bbox.x1))
+      l.words.pop();
+    l.bbox = { ...l.bbox, x0: l.words[0].bbox.x0, x1: l.words[l.words.length - 1].bbox.x1 };
   }
-  paras = merged;
+  // Zeilen, die nur aus Störzeichen bestehen und außerhalb der Spalte liegen, entfallen
+  for (const p of paras) p.lines = p.lines.filter((l) => !(l.words.every(isJunk) && (l.bbox.x1 < leftEdge || l.bbox.x0 > rightEdge)));
+  paras = paras.filter((p) => p.lines.length);
 
-  // 3. Absätze an großen vertikalen Lücken teilen
-  const split: P[] = [];
+  // 2c. Auszeichnung je Zeile: Fettdruck (Strichstärke im Verhältnis zur Schriftgröße) und Farbe
+  const relStroke = (w: OWord) => w.stroke ?? 0;
+  const strokeSamples: number[] = [];
+  const chromaSamples: number[] = [];
+  for (const p of paras)
+    for (const l of p.lines)
+      for (const w of l.words)
+        if (w.text.length >= 3 && w.stroke) {
+          strokeSamples.push(relStroke(w));
+          chromaSamples.push(w.chroma ?? 0);
+        }
+  const medStroke = median(strokeSamples);
+  const medChroma = median(chromaSamples);
+  for (const p of paras)
+    for (const l of p.lines) {
+      let boldChars = 0;
+      let colorChars = 0;
+      let chars = 0;
+      for (const w of l.words) {
+        const n = w.text.length;
+        chars += n;
+        if (medStroke > 0 && w.stroke && relStroke(w) >= medStroke * 1.2) boldChars += n;
+        if (w.chroma !== undefined && w.chroma >= Math.max(10, medChroma * 2.2, medChroma + 6)) colorChars += n;
+      }
+      l.bold = chars > 0 && boldChars / chars >= 0.55;
+      l.colored = chars > 0 && colorChars / chars >= 0.7;
+    }
+  const emphasized = (l: WLine) => !!(l.bold || l.colored || l.size >= medSize * 1.2);
+
+  // 3. Absätze neu bilden – innerhalb eines Textblocks (Spalte) nach Satzregeln:
+  //    größerer Abstand, kurze letzte Zeile mit Satzende, Einzug, Wechsel der Auszeichnung/Größe.
+  const gaps: number[] = [];
+  for (const p of paras)
+    for (let i = 1; i < p.lines.length; i++) gaps.push(p.lines[i].bbox.y0 - p.lines[i - 1].bbox.y1);
+  const medGap = Math.max(1, median(gaps));
+  const groups: P[] = [];
   for (const p of paras) {
+    const last = groups[groups.length - 1];
+    let join = !!last && last.blk !== undefined && last.blk === p.blk;
+    if (last && !join) {
+      // Tesseract teilt eine Spalte manchmal in mehrere Blöcke: direkt darunter, gleiche Spalte → zusammen
+      const a = last.lines[last.lines.length - 1];
+      const b = p.lines[0];
+      const lx0 = Math.min(...last.lines.map((l) => l.bbox.x0));
+      const lx1 = Math.max(...last.lines.map((l) => l.bbox.x1));
+      const overlap = Math.min(lx1, b.bbox.x1) - Math.max(lx0, b.bbox.x0);
+      const below = b.bbox.y0 > a.bbox.y0 && b.bbox.y0 - a.bbox.y1 < medH * 1.5;
+      join = below && overlap > Math.min(lx1 - lx0, b.bbox.x1 - b.bbox.x0) * 0.5;
+    }
+    if (join && last) last.lines.push(...p.lines);
+    else groups.push({ lines: [...p.lines], blk: p.blk });
+  }
+  const rebuilt: P[] = [];
+  for (const g of groups) {
+    const body = g.lines.filter((l) => l.words.length >= 3);
+    const colLeft = median((body.length ? body : g.lines).map((l) => l.bbox.x0));
+    const rights = (body.length ? body : g.lines).map((l) => l.bbox.x1).sort((x, y) => x - y);
+    const colRight = rights[Math.floor(rights.length * 0.85)] ?? rights[rights.length - 1];
+    const isShort = (l: WLine) => l.bbox.x1 < colRight - medH * 2;
+    // Gedichte/Listen: überwiegend kurze Zeilen → nicht an jeder kurzen Zeile trennen
+    const mostlyShort = g.lines.filter(isShort).length > g.lines.length * 0.5;
     let cur: WLine[] = [];
-    for (let i = 0; i < p.lines.length; i++) {
-      const l = p.lines[i];
+    for (const l of g.lines) {
       if (cur.length) {
         const prev = cur[cur.length - 1];
         const gap = l.bbox.y0 - prev.bbox.y1;
-        const sizeJump = Math.abs(l.size - prev.size) > medSize * 0.3;
-        if (gap > medH * 1.1 || sizeJump) {
-          split.push({ lines: cur });
+        const bigGap = gap > Math.max(medH * 0.7, medGap * 2.2);
+        const sizeJump = Math.abs(l.size - prev.size) > medSize * 0.25;
+        const styleChange = emphasized(l) !== emphasized(prev) || !!l.colored !== !!prev.colored;
+        const indentStart = l.bbox.x0 > colLeft + medH * 0.8 && l.bbox.x0 < colLeft + medH * 5 && prev.bbox.x0 <= colLeft + medH * 0.5;
+        const endsSentence = /[.!?:“”"»«)]$/.test(textOf(prev));
+        const shortEnd = !mostlyShort && isShort(prev) && endsSentence;
+        if (bigGap || sizeJump || styleChange || indentStart || shortEnd) {
+          rebuilt.push({ lines: cur, blk: g.blk });
           cur = [];
         }
       }
       cur.push(l);
     }
-    if (cur.length) split.push({ lines: cur });
+    if (cur.length) rebuilt.push({ lines: cur, blk: g.blk });
   }
-  paras = split;
+  paras = rebuilt;
 
   // 4. Seitenzahl und Kopf-/Fußzeilen
   let origPageNo: string | null = null;
@@ -303,7 +377,9 @@ export function analyzeOcr(input: OBlock[], imgW: number, imgH: number, margins:
     let type: BlockType = 'p';
     const note = hiddenNotes.get(p);
     if (note) type = 'hidden';
-    else if (p.lines.length <= 3 && size >= medSize * 1.2 && text0.length < 120 && !/[,;]$/.test(text0)) type = size >= medSize * 1.4 ? 'h1' : 'h2';
+    else if (p.lines.length <= 4 && p.lines.every(emphasized) && text0.length < 160 && !/[,;]$/.test(text0))
+      type = size >= medSize * 1.35 || p.lines.every((l) => l.colored) ? 'h1' : 'h2';
+    else if (p.lines.length <= 2 && size >= medSize * 1.15 && text0.length < 100 && !/[,;.]$/.test(text0)) type = 'h2';
     else if (
       (size <= medSize * 0.86 || h <= medH * 0.8) &&
       top > imgH * 0.55 &&
