@@ -18,7 +18,7 @@ Die gebaute App ist rein statisch (`dist/`) und kann z. B. über GitHub Pages be
 ## Arbeitsablauf
 
 1. **Seiten** – Bilder (JPG, PNG, WEBP) per Drag-and-drop oder Dateiauswahl laden. Sortierung automatisch nach Dateiname (IMG_2 vor IMG_10), danach per Ziehen änderbar oder nach erkannten Buchseitenzahlen. Drehen, Zuschneiden, Begradigen (manuell oder automatisch), Ersetzen, Entfernen.
-2. **Text** – Original links, erkannter Text rechts. Unsichere Wörter sind gelb (unter Schwelle) bzw. rot (sehr unsicher) markiert; „Nächste unsichere Stelle“ springt direkt hin und wählt das Wort aus. Wer ein markiertes Wort bearbeitet, bestätigt es damit. Abschnitte lassen sich als Überschrift, Absatz, Fußnote formatieren oder ausblenden, teilen, verbinden und mit Seitenumbrüchen versehen; Seiten lassen sich zusammenführen.
+2. **Text** – Original links, erkannter Text rechts. Unsichere Wörter sind gelb (unter Schwelle) bzw. rot (sehr unsicher) markiert; „Nächste unsichere Stelle“ springt direkt hin und wählt das Wort aus. Wer ein markiertes Wort bearbeitet, bestätigt es damit. Abschnitte lassen sich als Überschrift, Absatz, Fußnote formatieren oder ausblenden, teilen, verbinden und mit Seitenumbrüchen versehen; Seiten lassen sich zusammenführen. Reihenfolge ändern per Ziehen am Griff (⋮⋮) oder mit ↑/↓ – am Seitenanfang bzw. -ende wandert ein Abschnitt auf die vorige bzw. nächste Seite. Neue Abschnitte: „+“ fügt direkt darunter ein, „Überschrift oben einfügen“ ganz oben.
 3. **PDF** – Live-Vorschau, Einstellungen, Dateiname, Download mit einem Klick.
 
 ## Grundsatz: wortgetreu

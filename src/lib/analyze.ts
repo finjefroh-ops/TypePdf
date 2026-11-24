@@ -185,7 +185,7 @@ export function analyzeOcr(input: OBlock[], imgW: number, imgH: number, margins:
   const strongSingle = bestCount === 1 && cands.length === 1 && cands[0].conf >= 85 && Number(cands[0].value) % 5 === 0;
   for (const c of cands) {
     const off = Number(c.value) - (idxOf.get(c.line) ?? 0);
-    const ok = bestOff !== null && off === bestOff && (bestCount >= 2 || strongSingle || cands.filter((x) => x.conf >= 60).length === 1);
+    const ok = bestOff !== null && off === bestOff && (bestCount >= 2 || strongSingle);
     if (ok && c.conf >= 10) {
       c.line.lineNo = c.value;
     } else if (c.removed) {
@@ -318,6 +318,22 @@ export function analyzeOcr(input: OBlock[], imgW: number, imgH: number, margins:
   const topZone = imgH * 0.1;
   const bottomZone = imgH * 0.9;
   const hiddenNotes = new Map<P, string>();
+  // Seitenzahl, die an einen Absatz (z. B. Fußnote) angehängt wurde, wieder abtrennen
+  const isPageNoLine = (l: WLine) => PAGE_NO_RE.test(textOf(l)) && (l.bbox.y1 < topZone || l.bbox.y0 > bottomZone);
+  paras = paras.flatMap((p) => {
+    if (p.lines.length < 2) return [p];
+    const out: P[] = [];
+    let rest = p.lines;
+    if (isPageNoLine(rest[0])) {
+      out.push({ lines: [rest[0]], blk: p.blk });
+      rest = rest.slice(1);
+    }
+    const tail = rest.length > 1 && isPageNoLine(rest[rest.length - 1]) ? rest[rest.length - 1] : null;
+    if (tail) rest = rest.slice(0, -1);
+    out.push({ lines: rest, blk: p.blk });
+    if (tail) out.push({ lines: [tail], blk: p.blk });
+    return out;
+  });
   for (const p of paras) {
     if (p.lines.length !== 1) continue;
     const l = p.lines[0];
@@ -357,9 +373,16 @@ export function analyzeOcr(input: OBlock[], imgW: number, imgH: number, margins:
         origPageNo = mm[1];
         break;
       }
-      // einzelne Zahl im Randbereich (z. B. zentrierte Seitenzahl)
-      const nums = m.words.filter((w) => /^\d{1,4}$/.test(w.text.trim()) && w.confidence > 60);
-      if (nums.length === 1) {
+      // einzelne Zahl im Randbereich (z. B. zentrierte Seitenzahl): nur Zahlen in Textgröße,
+      // bei mehreren die sicherste, bei Gleichstand die mittigste
+      const nums = m.words
+        .filter((w) => /^\d{1,4}$/.test(w.text.trim()) && w.confidence > 60 && w.bbox.y1 - w.bbox.y0 >= medH * 0.35)
+        .sort(
+          (a, b) =>
+            b.confidence - a.confidence ||
+            Math.abs((a.bbox.x0 + a.bbox.x1) / 2 - imgW / 2) - Math.abs((b.bbox.x0 + b.bbox.x1) / 2 - imgW / 2),
+        );
+      if (nums.length) {
         origPageNo = nums[0].text.trim();
         break;
       }

@@ -1,4 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { isStale, useStore } from '../store';
 import type { Block, BlockType, Page, PageDoc } from '../types';
 import { renderTransformed, canvasToBlob } from '../lib/image';
@@ -7,8 +19,12 @@ import { newId } from '../lib/analyze';
 import { HighlightTextarea, type HighlightHandle } from './HighlightTextarea';
 import {
   IconCheck,
+  IconChevronDown,
   IconChevronLeft,
   IconChevronRight,
+  IconChevronUp,
+  IconGrip,
+  IconPlus,
   IconMerge,
   IconPageBreak,
   IconReplace,
@@ -143,6 +159,10 @@ function OcrProgress() {
 const textareaRefs = new Map<string, HighlightHandle>();
 let pendingSelect: { blockId: string; start: number; end: number } | null = null;
 let lastJump: { pageId: string; blockId: string; start: number } | null = null;
+/** Neu eingefügter Abschnitt, der nach dem Rendern den Cursor bekommt */
+let pendingFocus: string | null = null;
+
+const emptyBlock = (type: BlockType = 'p'): Block => ({ id: newId(), type, text: '', marks: [], lineNos: [null], lineBoxes: [] });
 
 function NextUncertainButton() {
   const pages = useStore((s) => s.pages);
@@ -195,6 +215,9 @@ function NextUncertainButton() {
 function PageEditor({ page, index }: { page: Page; index: number }) {
   const setBlocks = useStore((s) => s.setBlocks);
   const updatePage = useStore((s) => s.updatePage);
+  const moveBlockToPage = useStore((s) => s.moveBlockToPage);
+  const prevPage = useStore((s) => s.pages[index - 1]);
+  const nextPage = useStore((s) => s.pages[index + 1]);
   const runOcr = useStore((s) => s.runOcr);
   const ocrRunning = useStore((s) => s.ocrRunning);
   const threshold = useStore((s) => s.settings.uncertainThreshold);
@@ -214,6 +237,49 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
   const blocks = doc?.blocks ?? [];
   const setB = (next: Block[]) => setBlocks(page.id, next);
   const updateBlock = (id: string, fn: (b: Block) => Block) => setB(blocks.map((b) => (b.id === id ? fn(b) : b)));
+
+  // Neu eingefügten Abschnitt fokussieren
+  useEffect(() => {
+    if (!pendingFocus) return;
+    const id = pendingFocus;
+    const h = textareaRefs.get(id);
+    if (h) {
+      pendingFocus = null;
+      window.setTimeout(() => textareaRefs.get(id)?.select(0, 0), 30);
+    }
+  }, [blocks]);
+
+  const insertAt = (pos: number, type: BlockType = 'p') => {
+    const nb = emptyBlock(type);
+    pendingFocus = nb.id;
+    setB([...blocks.slice(0, pos), nb, ...blocks.slice(pos)]);
+    setFocused(nb.id);
+  };
+  const move = (bi: number, dir: -1 | 1) => {
+    const target = bi + dir;
+    const b = blocks[bi];
+    if (target < 0) {
+      if (prevPage?.doc && confirm('Abschnitt ans Ende der vorherigen Seite verschieben?')) moveBlockToPage(page.id, b.id, prevPage.id, 'end');
+      return;
+    }
+    if (target >= blocks.length) {
+      if (nextPage?.doc && confirm('Abschnitt an den Anfang der nächsten Seite verschieben?')) moveBlockToPage(page.id, b.id, nextPage.id, 'start');
+      return;
+    }
+    setB(arrayMove(blocks, bi, target));
+    pendingFocus = null;
+  };
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const onDragEnd = (e: DragEndEvent) => {
+    if (!e.over || e.active.id === e.over.id) return;
+    const ids = blocks.map((b) => b.id);
+    setB(arrayMove(blocks, ids.indexOf(String(e.active.id)), ids.indexOf(String(e.over.id))));
+  };
 
   const rerun = async () => {
     if (doc?.edited && !confirm('Der Text dieser Seite wurde bearbeitet. Bei erneuter Erkennung wird er ersetzt (Wiederherstellen danach möglich). Fortfahren?')) return;
@@ -325,48 +391,64 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
           {doc && blocks.length === 0 && (
             <div className="py-12 text-center text-sm text-muted">Auf dieser Seite wurde kein Text gefunden.</div>
           )}
-          {blocks.map((b, bi) => (
-            <BlockRow
-              key={b.id}
-              block={b}
-              first={bi === 0}
-              last={bi === blocks.length - 1}
-              threshold={threshold}
-              focused={focused === b.id}
-              onFocus={() => setFocused(b.id)}
-              onCaret={(pos) => carets.current.set(b.id, pos)}
-              onText={(t) => updateBlock(b.id, (old) => applyTextEdit(old, t))}
-              onType={(type) => updateBlock(b.id, (old) => ({ ...old, type, note: type === 'hidden' ? old.note : undefined }))}
-              onPageBreak={() => updateBlock(b.id, (old) => ({ ...old, pageBreakBefore: !old.pageBreakBefore }))}
-              onChecked={() => updateBlock(b.id, (old) => ({ ...old, marks: old.marks.filter((m) => m.conf >= threshold) }))}
-              onMerge={() => {
-                const next = blocks[bi + 1];
-                if (!next) return;
-                const merged = mergeBlocks(b, next);
-                setB([...blocks.slice(0, bi), merged, ...blocks.slice(bi + 2)]);
-              }}
-              onSplit={() => {
-                const pos = carets.current.get(b.id) ?? 0;
-                const parts = splitBlock(b, pos);
-                if (!parts) {
-                  alert('Setze den Cursor zuerst an die Stelle im Text, an der getrennt werden soll.');
-                  return;
-                }
-                setB([...blocks.slice(0, bi), parts[0], parts[1], ...blocks.slice(bi + 1)]);
-              }}
-              onDelete={() => {
-                if (!confirm('Diesen Abschnitt löschen?')) return;
-                setB(blocks.filter((x) => x.id !== b.id));
-              }}
-            />
-          ))}
           {doc && (
-            <button
-              className="btn-ghost mt-1 self-start"
-              onClick={() => setB([...blocks, { id: newId(), type: 'p', text: '', marks: [], lineNos: [null], lineBoxes: [] }])}
-            >
-              + Absatz hinzufügen
+            <button className="btn-ghost mb-1 self-start text-xs" onClick={() => insertAt(0, 'h1')} data-testid="insert-top">
+              <IconPlus width={13} height={13} /> Überschrift oben einfügen
             </button>
+          )}
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+            <SortableContext items={blocks.map((b) => b.id)} strategy={verticalListSortingStrategy}>
+              {blocks.map((b, bi) => (
+                <BlockRow
+                  key={b.id}
+                  block={b}
+                  first={bi === 0}
+                  last={bi === blocks.length - 1}
+                  canUp={bi > 0 || !!prevPage?.doc}
+                  canDown={bi < blocks.length - 1 || !!nextPage?.doc}
+                  threshold={threshold}
+                  focused={focused === b.id}
+                  onFocus={() => setFocused(b.id)}
+                  onCaret={(pos) => carets.current.set(b.id, pos)}
+                  onText={(t) => updateBlock(b.id, (old) => applyTextEdit(old, t))}
+                  onType={(type) => updateBlock(b.id, (old) => ({ ...old, type, note: type === 'hidden' ? old.note : undefined }))}
+                  onPageBreak={() => updateBlock(b.id, (old) => ({ ...old, pageBreakBefore: !old.pageBreakBefore }))}
+                  onChecked={() => updateBlock(b.id, (old) => ({ ...old, marks: old.marks.filter((m) => m.conf >= threshold) }))}
+                  onUp={() => move(bi, -1)}
+                  onDown={() => move(bi, 1)}
+                  onInsertBelow={() => insertAt(bi + 1)}
+                  onMerge={() => {
+                    const next = blocks[bi + 1];
+                    if (!next) return;
+                    const merged = mergeBlocks(b, next);
+                    setB([...blocks.slice(0, bi), merged, ...blocks.slice(bi + 2)]);
+                  }}
+                  onSplit={() => {
+                    const pos = carets.current.get(b.id) ?? 0;
+                    const parts = splitBlock(b, pos);
+                    if (!parts) {
+                      alert('Setze den Cursor zuerst an die Stelle im Text, an der getrennt werden soll.');
+                      return;
+                    }
+                    setB([...blocks.slice(0, bi), parts[0], parts[1], ...blocks.slice(bi + 1)]);
+                  }}
+                  onDelete={() => {
+                    if (b.text.trim() && !confirm('Diesen Abschnitt löschen?')) return;
+                    setB(blocks.filter((x) => x.id !== b.id));
+                  }}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
+          {doc && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              <button className="btn-ghost" onClick={() => insertAt(blocks.length)} data-testid="add-paragraph">
+                <IconPlus width={14} height={14} /> Absatz
+              </button>
+              <button className="btn-ghost" onClick={() => insertAt(blocks.length, 'h2')}>
+                <IconPlus width={14} height={14} /> Überschrift
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -378,6 +460,8 @@ function BlockRow(props: {
   block: Block;
   first: boolean;
   last: boolean;
+  canUp: boolean;
+  canDown: boolean;
   threshold: number;
   focused: boolean;
   onFocus: () => void;
@@ -389,15 +473,24 @@ function BlockRow(props: {
   onMerge: () => void;
   onSplit: () => void;
   onDelete: () => void;
+  onUp: () => void;
+  onDown: () => void;
+  onInsertBelow: () => void;
 }) {
   const { block: b, threshold } = props;
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: b.id });
   const uncertain = b.marks.filter((m) => m.conf < threshold).length;
   const hidden = b.type === 'hidden';
   const textCls =
     b.type === 'h1' ? 'font-semibold [&_.hl-input]:text-[18px] [&_.hl-backdrop]:text-[18px]' : b.type === 'h2' ? 'font-semibold' : b.type === 'footnote' ? '[&_.hl-input]:text-[13px] [&_.hl-backdrop]:text-[13px]' : '';
 
   return (
-    <div className="flex flex-col">
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Translate.toString(transform), transition, zIndex: isDragging ? 20 : undefined, position: 'relative' }}
+      className={`flex flex-col ${isDragging ? 'opacity-90 shadow-lg' : ''}`}
+      data-testid="block-row"
+    >
       {b.pageBreakBefore && (
         <div className="my-1 flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted">
           <div className="h-px flex-1 border-t border-dashed border-neutral-300" /> Seitenumbruch <div className="h-px flex-1 border-t border-dashed border-neutral-300" />
@@ -407,6 +500,16 @@ function BlockRow(props: {
         className={`group rounded-lg border transition-colors ${props.focused ? 'border-neutral-300 bg-white' : 'border-transparent hover:border-line'} ${hidden ? 'opacity-55' : ''}`}
       >
         <div className="flex flex-wrap items-center gap-1 px-2 pt-1.5 text-xs text-muted">
+          <button
+            ref={setActivatorNodeRef}
+            {...attributes}
+            {...listeners}
+            className="btn-ghost cursor-grab touch-none px-1 py-0.5 active:cursor-grabbing"
+            title="Ziehen, um den Abschnitt zu verschieben"
+            aria-label="Abschnitt verschieben"
+          >
+            <IconGrip width={14} height={14} />
+          </button>
           <select
             className="rounded border-0 bg-transparent py-0.5 pr-1 text-xs text-muted hover:bg-neutral-100 focus:bg-neutral-100"
             value={b.type}
@@ -426,6 +529,16 @@ function BlockRow(props: {
             </button>
           )}
           <div className={`ml-auto flex items-center ${props.focused ? '' : 'opacity-60 group-hover:opacity-100'}`}>
+            <button className="btn-ghost px-1.5 py-0.5" onClick={props.onUp} disabled={!props.canUp} title={props.first ? 'Ans Ende der vorherigen Seite verschieben' : 'Nach oben verschieben'} data-testid="move-up">
+              <IconChevronUp width={14} height={14} />
+            </button>
+            <button className="btn-ghost px-1.5 py-0.5" onClick={props.onDown} disabled={!props.canDown} title={props.last ? 'An den Anfang der nächsten Seite verschieben' : 'Nach unten verschieben'} data-testid="move-down">
+              <IconChevronDown width={14} height={14} />
+            </button>
+            <button className="btn-ghost px-1.5 py-0.5" onClick={props.onInsertBelow} title="Neuen Absatz darunter einfügen" data-testid="insert-below">
+              <IconPlus width={14} height={14} />
+            </button>
+            <span className="mx-0.5 h-4 w-px bg-line" />
             <button className="btn-ghost px-1.5 py-0.5" onClick={props.onSplit} title="Abschnitt am Cursor teilen"><IconSplit width={14} height={14} /></button>
             <button className="btn-ghost px-1.5 py-0.5" onClick={props.onMerge} disabled={props.last} title="Mit nächstem Abschnitt verbinden"><IconMerge width={14} height={14} /></button>
             <button

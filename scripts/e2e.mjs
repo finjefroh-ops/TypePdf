@@ -352,8 +352,60 @@ async function main() {
     const truth5 = [CURVED.heading, CURVED.sub1, ...CURVED.p1, CURVED.sub2, ...CURVED.p2].join(' ');
     const c5 = cer(truth5, norm(t5.join(' ')));
     check(c5 < 0.01, `Gewölbte Seite: CER ${(c5 * 100).toFixed(2)} %`);
+    const gut5 = await page.$$eval('.hl-gutter div', (els) => els.map((e) => e.textContent).filter(Boolean));
+    check(gut5.length === 0, `Gewölbte Seite: keine erfundenen Zeilennummern (${gut5.join(',')})`);
     check(ty5.join(',') === 'h1,h2,p,h2,p', `Gewölbte Seite: Struktur Überschrift/Zwischenüberschrift/Absatz (${ty5.join(',')})`);
     await page.screenshot({ path: join(OUT, '06c-editor-gewoelbt.png') });
+
+    // Abschnitte einfügen und verschieben
+    await page.locator('[data-testid=insert-top]').click();
+    await page.waitForTimeout(200);
+    await page.keyboard.type('Neue Hauptüberschrift');
+    let ty = await pageInfo();
+    let tx = await pageTexts();
+    check(ty[0] === 'h1' && tx[0] === 'Neue Hauptüberschrift', `Überschrift oben eingefügt und direkt beschreibbar (${ty[0]}: ${tx[0]})`);
+    await page.locator('[data-testid=move-down]').first().click();
+    tx = await pageTexts();
+    check(tx[1] === 'Neue Hauptüberschrift', 'Pfeil ↓ verschiebt Abschnitt nach unten');
+    await page.locator('[data-testid=move-up]').nth(1).click();
+    tx = await pageTexts();
+    check(tx[0] === 'Neue Hauptüberschrift', 'Pfeil ↑ verschiebt Abschnitt nach oben');
+    // Ziehen: letzten Abschnitt an den Anfang
+    const grips = page.getByLabel('Abschnitt verschieben');
+    const n = await grips.count();
+    const from = await grips.nth(n - 1).boundingBox();
+    const to = await grips.nth(0).boundingBox();
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(from.x + from.width / 2, from.y - 20, { steps: 5 });
+    await page.mouse.move(to.x + to.width / 2, to.y - 10, { steps: 20 });
+    await page.mouse.up();
+    await page.waitForTimeout(400);
+    const tx2 = await pageTexts();
+    check(tx2[0].startsWith('Rund zwei Drittel'), `Ziehen verschiebt Abschnitt an den Anfang (${tx2[0].slice(0, 25)}…)`);
+    await page.screenshot({ path: join(OUT, '06d-editor-verschieben.png') });
+    // zurückziehen per Pfeil ans Ende, Hilfsüberschrift löschen
+    for (let i = 0; i < n - 1; i++) await page.locator('[data-testid=move-down]').nth(i).click();
+    tx = await pageTexts();
+    check(tx[tx.length - 1].startsWith('Rund zwei Drittel'), 'Reihenfolge per Pfeilen wiederhergestellt');
+    // Auf vorherige Seite verschieben (erster Abschnitt, ↑) und zurück
+    page.once('dialog', (d) => d.accept());
+    await page.locator('[data-testid=move-up]').first().click();
+    await page.waitForTimeout(300);
+    const sel = await page.getByLabel('Seite wählen').inputValue();
+    const prevTexts = await pageTexts();
+    check(prevTexts[prevTexts.length - 1] === 'Neue Hauptüberschrift', 'Pfeil ↑ am Seitenanfang verschiebt auf die vorherige Seite');
+    page.once('dialog', (d) => d.accept());
+    await page.locator('[data-testid=move-down]').last().click();
+    await page.waitForTimeout(300);
+    tx = await pageTexts();
+    check(tx[0] === 'Neue Hauptüberschrift' && sel !== (await page.getByLabel('Seite wählen').inputValue()), 'Pfeil ↓ am Seitenende verschiebt auf die nächste Seite');
+    // Hilfsüberschrift wieder löschen
+    page.once('dialog', (d) => d.accept());
+    await page.locator('[data-testid=block-row]').first().getByTitle('Abschnitt löschen').click();
+    await page.waitForTimeout(200);
+    tx = await pageTexts();
+    check(tx[0] !== 'Neue Hauptüberschrift', 'Abschnitt gelöscht');
 
     // Nächste unsichere Stelle
     await page.getByLabel('Seite wählen').selectOption({ index: 0 });

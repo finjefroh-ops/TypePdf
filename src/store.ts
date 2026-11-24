@@ -28,6 +28,8 @@ interface State {
   setActive: (id: string | null) => void;
   updatePage: (id: string, patch: Partial<Page>) => void;
   setBlocks: (pageId: string, blocks: Block[]) => void;
+  /** Abschnitt auf eine andere Seite verschieben (an den Anfang oder ans Ende) */
+  moveBlockToPage: (fromPageId: string, blockId: string, toPageId: string, where: 'start' | 'end') => void;
   updateSettings: (s: Partial<Settings>) => void;
   runOcr: (ids?: string[], force?: boolean) => Promise<void>;
   cancelOcr: () => void;
@@ -168,6 +170,25 @@ export const useStore = create<State>((set, get) => {
       set((s) => ({
         pages: s.pages.map((p) => (p.id === pageId && p.doc ? { ...p, doc: { ...p.doc, blocks, edited: true } } : p)),
       })),
+
+    moveBlockToPage: (fromPageId, blockId, toPageId, where) =>
+      set((s) => {
+        const from = s.pages.find((p) => p.id === fromPageId);
+        const block = from?.doc?.blocks.find((b) => b.id === blockId);
+        const to = s.pages.find((p) => p.id === toPageId);
+        if (!from?.doc || !block || !to?.doc) return {};
+        // Zeilenpositionen gehören zum alten Bild → auf der neuen Seite nicht hervorheben
+        const moved = { ...block, lineBoxes: [], pageBreakBefore: false };
+        return {
+          pages: s.pages.map((p) => {
+            if (p.id === fromPageId && p.doc) return { ...p, doc: { ...p.doc, blocks: p.doc.blocks.filter((b) => b.id !== blockId), edited: true } };
+            if (p.id === toPageId && p.doc)
+              return { ...p, doc: { ...p.doc, blocks: where === 'start' ? [moved, ...p.doc.blocks] : [...p.doc.blocks, moved], edited: true } };
+            return p;
+          }),
+          activePageId: toPageId,
+        };
+      }),
 
     updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
 

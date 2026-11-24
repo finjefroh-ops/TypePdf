@@ -39,6 +39,9 @@ export const IconGrip = (p: P) => (
   <svg {...base(p)} fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.4" /><circle cx="15" cy="6" r="1.4" /><circle cx="9" cy="12" r="1.4" /><circle cx="15" cy="12" r="1.4" /><circle cx="9" cy="18" r="1.4" /><circle cx="15" cy="18" r="1.4" /></svg>
 );
 export const IconChevronLeft = (p: P) => <svg {...base(p)}><path d="m15 18-6-6 6-6" /></svg>;
+export const IconChevronUp = (p: P) => <svg {...base(p)}><path d="m6 15 6-6 6 6" /></svg>;
+export const IconChevronDown = (p: P) => <svg {...base(p)}><path d="m6 9 6 6 6-6" /></svg>;
+export const IconPlus = (p: P) => <svg {...base(p)}><path d="M12 5v14M5 12h14" /></svg>;
 export const IconChevronRight = (p: P) => <svg {...base(p)}><path d="m9 18 6-6-6-6" /></svg>;
 export const IconCheck = (p: P) => <svg {...base(p)}><path d="M5 12.5 10 17 19 7" /></svg>;
 export const IconX = (p: P) => <svg {...base(p)}><path d="M6 6l12 12M18 6 6 18" /></svg>;
