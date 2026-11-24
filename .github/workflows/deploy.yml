@@ -1,9 +1,11 @@
 # Baut TYPEPDF und veröffentlicht es auf GitHub Pages (Einstellungen → Pages → Quelle: GitHub Actions).
+# Veröffentlicht wird vom Branch, den die Pages-Umgebung freigegeben hat
+# (Settings → Environments → github-pages → Deployment branches).
 name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [claude/keen-thompson-uzfhvh]
   workflow_dispatch:
 
 permissions:
