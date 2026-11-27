@@ -53,6 +53,10 @@ export function loadLexicon(): Promise<Lexicon> {
 export interface DocVocab {
   words: Map<string, number>;
   pairs: Map<string, number>;
+  /** Wörter, die im Dokument kleingeschrieben vorkommen */
+  lowerForms: Set<string>;
+  /** Wörter, die mitten im Satz großgeschrieben vorkommen (Substantive, Namen) */
+  capForms: Set<string>;
 }
 
 const WORD_RE = /[\p{L}]+(?:-[\p{L}]+)*/gu;
@@ -61,6 +65,8 @@ const lower = (s: string) => s.toLocaleLowerCase('de-DE');
 export function buildDocVocab(blocks: Block[][], minConfFree = true): DocVocab {
   const words = new Map<string, number>();
   const pairs = new Map<string, number>();
+  const lowerForms = new Set<string>();
+  const capForms = new Set<string>();
   for (const page of blocks)
     for (const b of page) {
       if (b.type === 'hidden') continue;
@@ -75,11 +81,14 @@ export function buildDocVocab(blocks: Block[][], minConfFree = true): DocVocab {
           continue;
         }
         words.set(w, (words.get(w) ?? 0) + 1);
+        const first = m[0][0];
+        if (first === first.toLocaleLowerCase('de-DE')) lowerForms.add(w);
+        else if (!/(^|[.!?:]\s*[„"»]?)$/u.test(b.text.slice(0, s).trimEnd())) capForms.add(w);
         if (prev) pairs.set(`${prev} ${w}`, (pairs.get(`${prev} ${w}`) ?? 0) + 1);
         prev = w;
       }
     }
-  return { words, pairs };
+  return { words, pairs, lowerForms, capForms };
 }
 
 /** Typische OCR-Verwechslungen: [erkannt, richtig] */
@@ -254,7 +263,8 @@ function matchCase(cand: string, orig: string) {
  */
 export function suggestForBlocks(blocks: Block[], lex: Lexicon, vocab: DocVocab, threshold: number, autocorrect: boolean): Block[] {
   return blocks.map((b) => {
-    if (b.type === 'hidden' || !b.marks.length) return b;
+    if (b.type === 'hidden') return b;
+    if (!b.marks.length) return normalizeDashes(b, autocorrect);
     let text = b.text;
     const marks: Mark[] = [];
     let shift = 0;
@@ -273,7 +283,12 @@ export function suggestForBlocks(blocks: Block[], lex: Lexicon, vocab: DocVocab,
         const next = text.slice(end + 1).match(/^[\p{L}]+/u)?.[0] ?? '';
         const joined = lower(token.replace(/[^\p{L}]/gu, '') + next);
         if (lex.rank.has(joined) || vocab.words.has(joined) || isCompound(joined, lex, vocab)) {
-          marks.push({ ...mk, start, end });
+          // Groß/klein bei formgleichen Buchstaben (S/s, C/c, O/o, V/v, W/w, X/x, Z/z, K/k, P/p, U/u)
+          const fixCase = caseFix(token, joined, text.slice(0, start), vocab, mk.conf < threshold, true);
+          if (fixCase && autocorrect) {
+            text = text.slice(0, start) + fixCase + text.slice(end);
+            marks.push({ ...mk, start, end, orig: token, sugg: [token] });
+          } else marks.push({ ...mk, start, end, ...(fixCase ? { sugg: [fixCase] } : {}) });
           continue;
         }
       }
@@ -284,6 +299,15 @@ export function suggestForBlocks(blocks: Block[], lex: Lexicon, vocab: DocVocab,
           text = text.slice(0, start) + fixedTok + text.slice(end);
           marks.push({ ...mk, start, end, orig: token, sugg: [token] });
         } else marks.push({ ...mk, start, end, sugg: [fixedTok] });
+        continue;
+      }
+      // Großschreibung mitten im Satz bei formgleichen Buchstaben (z. B. „Sichern“ statt „sichern“)
+      const cf = caseFix(token, lower(token.replace(/[^\p{L}]/gu, '')), text.slice(0, start), vocab, mk.conf < threshold);
+      if (cf && (lex.rank.has(lower(token.replace(/[^\p{L}]/gu, ''))) || vocab.words.has(lower(token.replace(/[^\p{L}]/gu, ''))))) {
+        if (autocorrect) {
+          text = text.slice(0, start) + cf + text.slice(end);
+          marks.push({ ...mk, start, end, orig: token, sugg: [token] });
+        } else marks.push({ ...mk, start, end, sugg: [cf] });
         continue;
       }
       const before = text.slice(0, start).match(/([\p{L}]+)[^\p{L}]*$/u)?.[1];
@@ -323,6 +347,50 @@ export function suggestForBlocks(blocks: Block[], lex: Lexicon, vocab: DocVocab,
         marks.push({ ...mk, start, end, ...(show ? { sugg } : {}), ...(unknown ? { unknown: true } : {}) });
       }
     }
-    return { ...b, text, marks };
+    return normalizeDashes({ ...b, text, marks }, autocorrect);
   });
+}
+
+/** Buchstaben, deren Groß- und Kleinform sich fast nur in der Größe unterscheiden. */
+const CASE_AMBIGUOUS = new Set('sScCoOvVwWxXzZkKpPuU'.split(''));
+const NOUN_SUFFIX = /(ung|heit|keit|schaft|tion|ität|nis|tum|ling|chen|lein|ismus|ist|ment|ie|ei)(en|e|s|n)?$/;
+
+/**
+ * Kleinschreibung statt Großschreibung, wenn: der erste Buchstabe formgleich ist (S/s …),
+ * das Wort mitten im Satz steht, die OCR unsicher war und das Wort kein Substantiv ist
+ * (im Dokument kleingeschrieben belegt oder typische Verb-/Adjektivendung).
+ */
+function caseFix(token: string, joinedLower: string, before: string, vocab: DocVocab, unsure: boolean, hyphen = false): string | null {
+  const m = token.match(/^([^\p{L}]*)(\p{Lu})(.*)$/u);
+  if (!m || !unsure || !CASE_AMBIGUOUS.has(m[2])) return null;
+  // Satzanfang (nach . ! ? : oder Absatzbeginn, Anführungszeichen) → Großschreibung richtig
+  const prevText = before.replace(/[\s„“"‚‘»«(]+$/u, '');
+  if (!prevText || /[.!?:]$/.test(prevText)) return null;
+  if (vocab.capForms.has(joinedLower)) return null; // im Dokument als Substantiv/Name belegt
+  if (vocab.lowerForms.has(joinedLower)) return m[1] + m[2].toLowerCase() + m[3];
+  if (!hyphen) return null;
+  // getrennte Verben: „Ressourcen si-chern“, „zu ver-ändern“ – davor Substantiv oder „zu“
+  const prevWord = prevText.match(/([\p{L}]+)[^\p{L}]*$/u)?.[1] ?? '';
+  const verbEnding = /(ern|eln|ieren)$/.test(joinedLower) && !NOUN_SUFFIX.test(joinedLower);
+  const objectBefore = /^\p{Lu}/u.test(prevWord) || prevWord === 'zu';
+  return verbEnding && objectBefore ? m[1] + m[2].toLowerCase() + m[3] : null;
+}
+
+/**
+ * Freistehender langer Strich „—“ zwischen Wörtern ist im deutschen Satz der Gedankenstrich „–“.
+ * Wird (bei eingeschalteter Autokorrektur) ersetzt und als Autokorrektur markiert.
+ */
+function normalizeDashes(b: Block, autocorrect: boolean): Block {
+  if (!autocorrect || !/ — /.test(b.text)) return b;
+  const marks = [...b.marks];
+  const text = b.text.replace(/ — /g, (_m, off: number) => {
+    const pos = off + 1;
+    const i = marks.findIndex((m) => m.start === pos && m.end === pos + 1);
+    const base = i >= 0 ? marks[i] : { start: pos, end: pos + 1, conf: 100 };
+    const nm: Mark = { ...base, orig: '—', sugg: ['—'] };
+    if (i >= 0) marks[i] = nm;
+    else marks.push(nm);
+    return ' – ';
+  });
+  return { ...b, text, marks };
 }

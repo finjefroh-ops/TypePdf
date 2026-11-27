@@ -24,6 +24,20 @@ for (const [w, want] of cases) {
   console.log(`${pass ? '✓' : '✗'} ${w.padEnd(18)} → ${got.padEnd(18)} valid=${a?.valid} sugg=${a?.suggestions.map((s) => s.word + ':' + s.score.toFixed(1)).join(', ')}`);
 }
 console.log(`${ok}/${cases.length}`);
+// Groß/klein und Gedankenstrich im Satzzusammenhang
+const ctxCases: [string, number, number, string][] = [
+  ['Ressourcen Si-\nchern und', 11, 14, 'Ressourcen si-\nchern und'],
+  ['mit den Schwes-\ntern spielen', 8, 15, 'mit den Schwes-\ntern spielen'],
+  ['Am Ende. Si-\nchern Sie das', 9, 12, 'Am Ende. Si-\nchern Sie das'],
+  ['in Computerspielen — teils', 19, 20, 'in Computerspielen – teils'],
+];
+let ctxOk = 0;
+for (const [text, s0, e0, want] of ctxCases) {
+  const out = suggestForBlocks([{ id: 'c', type: 'p', text, marks: [{ start: s0, end: e0, conf: 43 }], lineNos: [null, null], lineBoxes: [] }], lex, vocab, 80, true)[0];
+  const pass = out.text === want;
+  if (pass) ctxOk++;
+  console.log(`${pass ? '✓' : '✗'} ${JSON.stringify(text)} → ${JSON.stringify(out.text)}`);
+}
 // „verbreiteu“: richtiger Vorschlag steht vorn
 const vb = analyzeWord('verbreiteu', lex, vocab);
 const vbOk = vb?.suggestions[0]?.word === 'verbreiten';
@@ -31,4 +45,4 @@ console.log(`${vbOk ? '✓' : '✗'} Vorschlag für „verbreiteu“: ${vb?.sugg
 const t0 = Date.now();
 for (let i = 0; i < 50; i++) analyzeWord('Handlungselernent', lex, vocab);
 console.log('ms/Wort', (Date.now() - t0) / 50);
-process.exit(ok === cases.length && vbOk ? 0 : 1);
+process.exit(ok === cases.length && vbOk && ctxOk === ctxCases.length ? 0 : 1);

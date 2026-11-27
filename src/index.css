@@ -68,3 +68,7 @@ button:disabled { cursor: default; }
 }
 .hl-gutter { font: 12px/1.6 ui-sans-serif, system-ui, sans-serif; padding: 6px 0; }
 .hl-gutter div { height: calc(15px * 1.6); line-height: calc(15px * 1.6); }
+
+/* Abschnitte ohne Original-Zeilennummern: in der Ansicht umbrechen (Text bleibt unverändert) */
+.hl-soft .hl-backdrop, .hl-soft .hl-input { white-space: pre-wrap; overflow-wrap: break-word; }
+.hl-soft .hl-input { overflow-x: hidden; }

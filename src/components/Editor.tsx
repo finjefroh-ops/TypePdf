@@ -13,7 +13,7 @@ import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from '@dnd-kit/utilities';
 import { isStale, useStore } from '../store';
 import { needsReview, type Block, type BlockType, type Box, type Page, type PageDoc } from '../types';
-import { applyTextEdit, mergeBlocks, splitBlock } from '../lib/textedit';
+import { applyTextEdit, extractRange, joinLinesInRange, mergeBlocks, splitBlock } from '../lib/textedit';
 import { newId } from '../lib/analyze';
 import { HighlightTextarea, type HighlightHandle } from './HighlightTextarea';
 import { Switch } from './Switch';
@@ -177,6 +177,11 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
   const threshold = useStore((s) => s.settings.uncertainThreshold);
   const [focused, setFocused] = useState<string | null>(null);
   const carets = useRef(new Map<string, number>());
+  // Textauswahl innerhalb eines Abschnitts (für die Formatleiste)
+  const [sel, setSel] = useState<{ blockId: string; start: number; end: number } | null>(null);
+  // Mehrfachauswahl ganzer Abschnitte
+  const [multiMode, setMultiMode] = useState(false);
+  const [multi, setMulti] = useState<string[]>([]);
   const doc = page.doc;
   const stale = isStale(page);
 
@@ -338,9 +343,68 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
             <div className="py-12 text-center text-sm text-muted">Auf dieser Seite wurde kein Text gefunden.</div>
           )}
           {doc && (
-            <button className="btn-ghost mb-1 self-start text-xs" onClick={() => insertAt(0, 'h1')} data-testid="insert-top">
-              <IconPlus width={13} height={13} /> Überschrift oben einfügen
-            </button>
+            <div className="mb-1 flex flex-wrap items-center gap-1">
+              <button className="btn-ghost text-xs" onClick={() => insertAt(0, 'h1')} data-testid="insert-top">
+                <IconPlus width={13} height={13} /> Überschrift oben einfügen
+              </button>
+              <button
+                className={`btn-ghost ml-auto text-xs ${multiMode ? 'bg-blue/10 text-blue' : ''}`}
+                onClick={() => {
+                  setMultiMode((m) => !m);
+                  setMulti([]);
+                }}
+                data-testid="multi-toggle"
+              >
+                <IconCheck width={13} height={13} /> {multiMode ? 'Auswahl beenden' : 'Abschnitte auswählen'}
+              </button>
+            </div>
+          )}
+          {sel && sel.end > sel.start && !multiMode && (
+            <FormatBar
+              label={`${sel.end - sel.start} Zeichen markiert`}
+              onType={(t) => {
+                const bi = blocks.findIndex((b) => b.id === sel.blockId);
+                if (bi < 0) return;
+                const { parts, index } = extractRange(blocks[bi], sel.start, sel.end);
+                parts[index] = { ...parts[index], type: t, note: undefined };
+                setB([...blocks.slice(0, bi), ...parts, ...blocks.slice(bi + 1)]);
+                setSel(null);
+                setFocused(parts[index].id);
+              }}
+              onJoin={() => {
+                updateBlock(sel.blockId, (old) => joinLinesInRange(old, sel.start, sel.end));
+                setSel(null);
+              }}
+              onClose={() => setSel(null)}
+            />
+          )}
+          {multiMode && (
+            <FormatBar
+              label={multi.length ? `${multi.length} ${multi.length === 1 ? 'Abschnitt' : 'Abschnitte'} ausgewählt` : 'Abschnitte antippen zum Auswählen'}
+              disabled={!multi.length}
+              onType={(t) => setB(blocks.map((b) => (multi.includes(b.id) ? { ...b, type: t, note: t === 'hidden' ? b.note : undefined } : b)))}
+              onMerge={
+                multi.length > 1
+                  ? () => {
+                      const chosen = blocks.filter((b) => multi.includes(b.id));
+                      const merged = chosen.slice(1).reduce((acc, b) => mergeBlocks(acc, b), chosen[0]);
+                      setB(blocks.filter((b) => !multi.includes(b.id) || b.id === chosen[0].id).map((b) => (b.id === chosen[0].id ? merged : b)));
+                      setMulti([merged.id]);
+                    }
+                  : undefined
+              }
+              onDelete={() => {
+                if (!confirm(`${multi.length} Abschnitt(e) löschen?`)) return;
+                setB(blocks.filter((b) => !multi.includes(b.id)));
+                setMulti([]);
+              }}
+              onSelectAll={() => setMulti(multi.length === blocks.length ? [] : blocks.map((b) => b.id))}
+              allSelected={multi.length === blocks.length && blocks.length > 0}
+              onClose={() => {
+                setMultiMode(false);
+                setMulti([]);
+              }}
+            />
           )}
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
             <SortableContext items={blocks.map((b) => b.id)} strategy={verticalListSortingStrategy}>
@@ -357,6 +421,10 @@ function PageEditor({ page, index }: { page: Page; index: number }) {
                   focused={focused === b.id}
                   onFocus={() => setFocused(b.id)}
                   onCaret={(pos) => carets.current.set(b.id, pos)}
+                  onSelectRange={(start, end) => setSel(end > start ? { blockId: b.id, start, end } : null)}
+                  selectMode={multiMode}
+                  selected={multi.includes(b.id)}
+                  onToggleSelect={() => setMulti((m) => (m.includes(b.id) ? m.filter((x) => x !== b.id) : [...m, b.id]))}
                   onText={(t) => updateBlock(b.id, (old) => applyTextEdit(old, t))}
                   onType={(type) => updateBlock(b.id, (old) => ({ ...old, type, note: type === 'hidden' ? old.note : undefined }))}
                   onPageBreak={() => updateBlock(b.id, (old) => ({ ...old, pageBreakBefore: !old.pageBreakBefore }))}
@@ -415,6 +483,10 @@ function BlockRow(props: {
   focused: boolean;
   onFocus: () => void;
   onCaret: (pos: number) => void;
+  onSelectRange: (start: number, end: number) => void;
+  selectMode: boolean;
+  selected: boolean;
+  onToggleSelect: () => void;
   onText: (t: string) => void;
   onType: (t: BlockType) => void;
   onPageBreak: () => void;
@@ -447,8 +519,24 @@ function BlockRow(props: {
         </div>
       )}
       <div
-        className={`group rounded-lg border transition-colors ${props.focused ? 'border-neutral-300 bg-white' : 'border-transparent hover:border-line'} ${hidden ? 'opacity-55' : ''}`}
+        className={`group relative rounded-lg border transition-colors ${
+          props.selected ? 'border-blue bg-blue/[0.04] ring-1 ring-blue/40' : props.focused ? 'border-neutral-300 bg-white' : 'border-transparent hover:border-line'
+        } ${hidden ? 'opacity-55' : ''}`}
       >
+        {props.selectMode && (
+          // Im Auswahlmodus: ganzer Abschnitt ist eine Tippfläche
+          <button
+            className="absolute inset-0 z-10 flex items-start justify-end rounded-lg p-2"
+            onClick={props.onToggleSelect}
+            aria-pressed={props.selected}
+            aria-label="Abschnitt auswählen"
+            data-testid="block-select"
+          >
+            <span className={`flex h-6 w-6 items-center justify-center rounded-full border-2 ${props.selected ? 'border-blue bg-blue text-white' : 'border-black/25 bg-white'}`}>
+              {props.selected && <IconCheck width={14} height={14} />}
+            </span>
+          </button>
+        )}
         <div className="flex flex-wrap items-center gap-1 px-2 pt-1.5 text-xs text-muted">
           <button
             ref={setActivatorNodeRef}
@@ -517,6 +605,7 @@ function BlockRow(props: {
           onChange={props.onText}
           onFocus={props.onFocus}
           onCaret={props.onCaret}
+          onSelectRange={props.onSelectRange}
           ariaLabel={TYPE_LABEL[b.type]}
         />
       </div>
@@ -589,6 +678,66 @@ function ImagePane({ page, highlight, wordBox }: { page: Page; highlight: Block 
             />
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Schwebende Formatleiste für markierten Text bzw. ausgewählte Abschnitte. */
+function FormatBar(props: {
+  label: string;
+  disabled?: boolean;
+  onType: (t: BlockType) => void;
+  onJoin?: () => void;
+  onMerge?: () => void;
+  onDelete?: () => void;
+  onSelectAll?: () => void;
+  allSelected?: boolean;
+  onClose: () => void;
+}) {
+  // mousedown abfangen, damit die Textauswahl beim Klick erhalten bleibt
+  const keep = (e: React.MouseEvent) => e.preventDefault();
+  const types: [BlockType, string][] = [
+    ['h1', 'Überschrift 1'],
+    ['h2', 'Überschrift 2'],
+    ['p', 'Absatz'],
+    ['footnote', 'Fußnote'],
+    ['hidden', 'Ausblenden'],
+  ];
+  return (
+    <div className="pointer-events-none fixed inset-x-0 top-[64px] z-40 flex justify-center px-3" data-testid="format-bar">
+      <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-1 rounded-2xl border border-black/[0.08] bg-white/90 p-1.5 shadow-[0_8px_30px_rgba(0,0,0,0.14)] backdrop-blur-xl">
+        <span className="px-2 text-[12px] text-muted">{props.label}</span>
+        {props.onSelectAll && (
+          <button className="btn-ghost text-[13px]" onMouseDown={keep} onClick={props.onSelectAll}>
+            {props.allSelected ? 'Keine' : 'Alle'}
+          </button>
+        )}
+        <span className="mx-0.5 h-5 w-px bg-line" />
+        {types.map(([t, l]) => (
+          <button key={t} className="btn-ghost text-[13px] text-ink" disabled={props.disabled} onMouseDown={keep} onClick={() => props.onType(t)} data-testid={`fmt-${t}`}>
+            {l}
+          </button>
+        ))}
+        {props.onJoin && (
+          <button className="btn-ghost text-[13px] text-ink" onMouseDown={keep} onClick={props.onJoin} title="Zeilenumbrüche im markierten Text entfernen" data-testid="fmt-join">
+            Zeilen verbinden
+          </button>
+        )}
+        {props.onMerge && (
+          <button className="btn-ghost text-[13px] text-ink" onMouseDown={keep} onClick={props.onMerge} data-testid="fmt-merge">
+            <IconMerge width={14} height={14} /> Zusammenführen
+          </button>
+        )}
+        {props.onDelete && (
+          <button className="btn-ghost text-[13px] hover:text-red-700" disabled={props.disabled} onMouseDown={keep} onClick={props.onDelete} data-testid="fmt-delete">
+            <IconTrash width={14} height={14} />
+          </button>
+        )}
+        <span className="mx-0.5 h-5 w-px bg-line" />
+        <button className="btn-ghost text-[13px] font-medium text-blue" onMouseDown={keep} onClick={props.onClose} data-testid="fmt-close">
+          Fertig
+        </button>
       </div>
     </div>
   );

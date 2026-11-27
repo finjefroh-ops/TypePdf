@@ -94,3 +94,42 @@ export function mergeBlocks(a: Block, b: Block): Block {
 
 /** Index der Zeile, in der eine Zeichenposition liegt. */
 export const lineIndexAt = (text: string, pos: number) => countNl(text, pos);
+
+/**
+ * Löst den Bereich [start, end) als eigenen Abschnitt heraus.
+ * Ergebnis: [davor?, Auswahl, danach?] und der Index des ausgewählten Teils.
+ * Davor und danach behalten die ursprüngliche Art (z. B. Absatz).
+ */
+export function extractRange(block: Block, start: number, end: number): { parts: Block[]; index: number } {
+  const t = block.text;
+  // Leerraum an den Rändern der Auswahl ignorieren
+  while (start < end && /\s/.test(t[start])) start++;
+  while (end > start && /\s/.test(t[end - 1])) end--;
+  if (end <= start) return { parts: [block], index: 0 };
+  let rest: Block = block;
+  let after: Block | null = null;
+  if (t.slice(end).trim()) {
+    const sp = splitBlock(block, end);
+    if (sp) {
+      rest = sp[0];
+      after = { ...sp[1], type: block.type };
+    }
+  }
+  let before: Block | null = null;
+  let mid: Block = rest;
+  if (t.slice(0, start).trim()) {
+    const sp = splitBlock(rest, start);
+    if (sp) {
+      before = sp[0];
+      mid = sp[1];
+    }
+  }
+  const parts = [before, mid, after].filter(Boolean) as Block[];
+  return { parts, index: before ? 1 : 0 };
+}
+
+/** Zeilenumbrüche im Bereich durch Leerzeichen ersetzen (Trennstriche am Zeilenende zusammenführen). */
+export function joinLinesInRange(block: Block, start: number, end: number): Block {
+  const seg = block.text.slice(start, end).replace(/([\p{L}])-\n(\p{Ll})/gu, '$1$2').replace(/\s*\n\s*/g, ' ');
+  return applyTextEdit(block, block.text.slice(0, start) + seg + block.text.slice(end));
+}

@@ -13,6 +13,8 @@ interface Props {
   onChange: (text: string) => void;
   onFocus?: () => void;
   onCaret?: (pos: number) => void;
+  /** Markierter Bereich im Textfeld (start === end: keine Auswahl) */
+  onSelectRange?: (start: number, end: number) => void;
   ariaLabel?: string;
 }
 
@@ -27,7 +29,7 @@ export interface HighlightHandle {
  * Die Markierungen liegen in einer Ebene hinter dem (transparenten) Textfeld.
  */
 export const HighlightTextarea = forwardRef<HighlightHandle, Props>(function HighlightTextarea(
-  { text, marks, lineNos, threshold, showGutter, current, className, onChange, onFocus, onCaret, ariaLabel },
+  { text, marks, lineNos, threshold, showGutter, current, className, onChange, onFocus, onCaret, onSelectRange, ariaLabel },
   ref,
 ) {
   const ta = useRef<HTMLTextAreaElement>(null);
@@ -57,6 +59,21 @@ export const HighlightTextarea = forwardRef<HighlightHandle, Props>(function Hig
     el.style.height = `${el.scrollHeight}px`;
   }, [text]);
 
+  // Höhe auch bei Breitenänderung (z. B. iPad drehen) anpassen
+  useLayoutEffect(() => {
+    const el = ta.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let w = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === w) return;
+      w = el.clientWidth;
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight}px`;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const segments = useMemo(() => {
     const visible = marks.filter((m) => needsReview(m, threshold) && m.end <= text.length).sort((a, b) => a.start - b.start);
     const out: { t: string; cls?: string; title?: string }[] = [];
@@ -76,7 +93,7 @@ export const HighlightTextarea = forwardRef<HighlightHandle, Props>(function Hig
   const hasLineNos = lineNos.some(Boolean);
 
   return (
-    <div className={`flex ${className ?? ''}`}>
+    <div className={`flex ${hasLineNos ? '' : 'hl-soft'} ${className ?? ''}`}>
       {showGutter && (
         <div className="hl-gutter w-8 shrink-0 select-none pr-1.5 text-right text-muted" aria-hidden>
           {Array.from({ length: lineCount }, (_, i) => (
@@ -105,12 +122,22 @@ export const HighlightTextarea = forwardRef<HighlightHandle, Props>(function Hig
           spellCheck={false}
           autoCorrect="off"
           autoCapitalize="off"
-          wrap="off"
+          wrap={hasLineNos ? 'off' : 'soft'}
           rows={1}
           aria-label={ariaLabel}
           onChange={(e) => onChange(e.target.value)}
           onFocus={onFocus}
-          onSelect={(e) => onCaret?.(e.currentTarget.selectionStart)}
+          onSelect={(e) => {
+            onCaret?.(e.currentTarget.selectionStart);
+            onSelectRange?.(e.currentTarget.selectionStart, e.currentTarget.selectionEnd);
+          }}
+          onMouseUp={(e) => onSelectRange?.(e.currentTarget.selectionStart, e.currentTarget.selectionEnd)}
+          onKeyUp={(e) => onSelectRange?.(e.currentTarget.selectionStart, e.currentTarget.selectionEnd)}
+          onTouchEnd={(e) => {
+            const el = e.currentTarget;
+            // iPad: Auswahl steht erst nach dem Loslassen fest
+            window.setTimeout(() => onSelectRange?.(el.selectionStart, el.selectionEnd), 350);
+          }}
           onScroll={(e) => {
             if (bd.current) bd.current.scrollLeft = e.currentTarget.scrollLeft;
           }}

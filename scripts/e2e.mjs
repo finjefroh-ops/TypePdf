@@ -423,6 +423,47 @@ async function main() {
     tx = await pageTexts();
     check(tx[0] !== 'Neue Hauptüberschrift', 'Abschnitt gelöscht');
 
+    // Textauswahl-Werkzeug: markierten Text umformatieren
+    const selectIn = async (idx, a, b) => {
+      await page.locator('[data-testid=block-list] textarea').nth(idx).evaluate((el, [x, y]) => {
+        el.focus();
+        el.setSelectionRange(x, y);
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      }, [a, b]);
+      await page.waitForTimeout(150);
+    };
+    let ty0 = await pageInfo();
+    let tx0 = await pageTexts();
+    const pIdx = ty0.indexOf('p');
+    const firstLine = tx0[pIdx].split('\n')[0];
+    await selectIn(pIdx, 0, firstLine.length);
+    check(await page.locator('[data-testid=format-bar]').isVisible(), 'Formatleiste erscheint bei markiertem Text');
+    await page.screenshot({ path: join(OUT, '06f-formatleiste.png') });
+    await page.locator('[data-testid=fmt-h2]').click();
+    await page.waitForTimeout(200);
+    let ty1 = await pageInfo();
+    let tx1 = await pageTexts();
+    check(ty1[pIdx] === 'h2' && tx1[pIdx] === firstLine && ty1[pIdx + 1] === 'p' && tx1.length === tx0.length + 1, 'Markierte Zeile wird eigener Abschnitt als Überschrift 2');
+    // Zeilen verbinden im Rest-Absatz
+    const rest = tx1[pIdx + 1];
+    await selectIn(pIdx + 1, 0, rest.length);
+    await page.locator('[data-testid=fmt-join]').click();
+    await page.waitForTimeout(200);
+    tx1 = await pageTexts();
+    check(!tx1[pIdx + 1].includes('\n') && tx1[pIdx + 1].replace(/\s+/g, ' ') === rest.replace(/\s+/g, ' '), 'Zeilen verbinden entfernt nur die Zeilenumbrüche');
+    // Mehrfachauswahl: Überschrift + Absatz zusammenführen und als Absatz setzen
+    await page.locator('[data-testid=multi-toggle]').click();
+    await page.locator('[data-testid=block-select]').nth(pIdx).click();
+    await page.locator('[data-testid=block-select]').nth(pIdx + 1).click();
+    await page.screenshot({ path: join(OUT, '06g-mehrfachauswahl.png') });
+    await page.locator('[data-testid=fmt-merge]').click();
+    await page.locator('[data-testid=fmt-p]').click();
+    await page.locator('[data-testid=fmt-close]').click();
+    await page.waitForTimeout(200);
+    const ty2 = await pageInfo();
+    const tx2b = await pageTexts();
+    check(ty2.length === ty0.length && ty2[pIdx] === 'p' && tx2b[pIdx].startsWith(firstLine), 'Mehrfachauswahl: zusammenführen und Art setzen');
+
     // Prüfleiste: schwebt unten, zeigt Bildausschnitt, Vorschläge und Eingabe
     if (marks.length) {
       await page.waitForSelector('[data-testid=review-bar]');
